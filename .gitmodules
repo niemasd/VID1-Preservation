@@ -1,0 +1,3 @@
+[submodule "librempeg"]
+	path = librempeg
+	url = https://github.com/librempeg/librempeg.git
