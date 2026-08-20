@@ -1,8 +1,9 @@
-# video files
+# additional files/folders
 *.m4v
 *.mkv
 *.mp4
 *.vid
+test/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
