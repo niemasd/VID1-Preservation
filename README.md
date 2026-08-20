@@ -53,7 +53,7 @@ find . -type f -name '*.vid' -exec sh -c '"$HOME/VID1-Video-Translator/vid1_deco
 ```
 
 ## Extract Audio Stream to FLAC
-We will next use librempeg's `ffmpeg` to convert the VID1 file's audio stream to a lossless-compressed FLAC file:
+We will next use librempeg's `ffmpeg` to convert the VID1 file's audio stream to a lossless-compressed FLAC file (the command below assumes just 1 audio stream, but a VID1 container can have multiple audio streams, so beware):
 
 ```bash
 ffmpeg -i original.vid -vn -c:a flac -compression_level 12 audio.flac
@@ -61,10 +61,41 @@ ffmpeg -i original.vid -vn -c:a flac -compression_level 12 audio.flac
 
 This isn't strictly necessary (we can directly copy the original audio stream), but not all `.vid` files have audio streams: some (such as those in *The Lord of the Rings: The Return of the King*) only have a video stream, and the corresponding audio is elsewhere on the disc. By converting all audio to FLAC, we maintain consistency (every final file will have FFV1 video and FLAC audio), and we enable ourselves to fill in missing audio files manually on a disc-by-disc basis if needed.
 
-To recursively run it on all `.vid` files nested within the current directory:
+To recursively run it on all `.vid` files nested within the current directory (outputting the different audio streams into different output files if the `.vid` file has multiple):
 
 ```bash
-find . -type f -name '*.vid' -exec "$HOME/VID1-Video-Translator/librempeg/ffmpeg" -i {} -vn -c:a flac -compression_level 12 {}.audio.flac \;
+find . -type f -name '*.vid' -exec bash -c '
+  tools="$HOME/VID1-Video-Translator/librempeg"
+  ffmpeg="$tools/ffmpeg"
+  ffprobe="$tools/ffprobe"
+
+  for input in "$@"; do
+    output_args=()
+    audio_number=0
+
+    while IFS= read -r stream_index; do
+      ((audio_number += 1))
+
+      output_args+=(
+        -map "0:${stream_index}"
+        -vn
+        -c:a flac
+        -compression_level 12
+        "${input}.audio.${audio_number}.flac"
+      )
+    done < <(
+      "$ffprobe" -v error \
+        -select_streams a \
+        -show_entries stream=index \
+        -of csv=p=0 \
+        "$input"
+    )
+
+    if ((audio_number > 0)); then
+      "$ffmpeg" -i "$input" "${output_args[@]}"
+    fi
+  done
+' _ {} +
 ```
 
 ## Remux Translated Video Stream and FLAC Audio Stream
