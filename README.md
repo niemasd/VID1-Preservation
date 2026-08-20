@@ -43,16 +43,29 @@ There might be other dependencies that you need to install as well. You can Goog
 We will first use the [`vid1_decode.py`](vid1_decode.py) script to decode the VID1 video stream into an FFV1 MKV file:
 
 ```bash
-python3 vid1_decode.py original.vid decoded.mkv
+python3 vid1_decode.py original.vid video.mkv
 ```
 
-This re-encodes the video stream to FFV1 and saves it in an MKV container.
+This re-encodes the video stream to FFV1 and saves it in an MKV container. To recursively run it on all `.vid` files nested within the current directory (automatically reattempting failed runs with `--resync-scan`):
 
-## Remux Translated Video Stream and Original Audio Stream
+```bash
+find . -type f -name '*.vid' -exec sh -c '"$HOME/VID1-Video-Translator/vid1_decode.py" "$1" "$1.video.mkv" || "$HOME/VID1-Video-Translator/vid1_decode.py" --resync-scan "$1" "$1.video.mkv"' sh {} \;
+```
+
+## Extract Audio Stream to FLAC
+We will next use librempeg's `ffmpeg` to convert the VID1 file's audio stream to a lossless-compressed FLAC file:
+
+```bash
+ffmpeg -i original.vid -c:a flac audio.flac
+```
+
+This isn't strictly necessary (we can directly copy the original audio stream), but not all `.vid` files have audio streams: some (such as those in *The Lord of the Rings: The Return of the King*) only have a video stream, and the corresponding audio is elsewhere on the disc. By converting all audio to FLAC, we maintain consistency (every final file will have FFV1 video and FLAC audio), and we enable ourselves to fill in missing audio files manually on a disc-by-disc basis if needed.
+
+## Remux Translated Video Stream and FLAC Audio Stream
 Next, we will use the source-compiled `ffmpeg` to remux the translated video stream with the original audio stream.
 
 ```bash
-./build/bin/ffmpeg -i decoded.mkv -i original.vid -c copy -map 0:v:0 -map 1:a:0 remuxed.mkv
+./build/bin/ffmpeg -i video.mkv -i audio.flac -c copy -map 0:v:0 -map 1:a:0 remuxed.mkv
 ```
 
 This does ***not*** re-encode the video or audio stream: it's directly remuxing them into an MKV container.
