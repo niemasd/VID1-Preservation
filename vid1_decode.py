@@ -16,12 +16,12 @@ Only video is decoded; VID1 audio chunks are ignored.
 
 S/GMC pictures are accepted in either standard MPEG-4 trajectory syntax or
 the byte-aligned 16-bit form used by retail VID1 streams.  In the supplied
-retail stream, those 16-bit words are not ordinary signed fixed-point values:
-the horizontal component stores a folded signed integer as ``raw >> 2`` and
-the vertical component stores one as ``raw >> 3``.  Even folded codes are
-non-negative and odd codes are negative.  Auto mode recognises that exact
-low-bit layout and writes the corresponding MPEG-4 sprite trajectory.  Legacy
-divisor-based mappings remain available as explicit compatibility options.
+retail stream, the horizontal word stores a signed-magnitude code as
+``raw >> 2`` and the vertical word stores one as ``raw >> 3``.  The low bit is
+the sign (odd means negative) and the remaining bits are the magnitude.  Auto
+mode recognises that exact low-bit layout and writes the corresponding MPEG-4
+sprite trajectory.  The v4 folded/zig-zag interpretation and divisor-based
+mappings remain available as explicit diagnostic compatibility options.
 
 Extended VID1 luma/chroma quantisation matrices do not map one-for-one onto
 MPEG-4 Part 2's intra/non-intra matrices.  For such pictures this program can
@@ -69,7 +69,7 @@ ByteBuffer = Union[bytes, memoryview]
 
 
 PROGRAM = "vid1_decode.py"
-VERSION = "4.0"
+VERSION = "5.0"
 
 
 def tag(text: str) -> int:
@@ -1046,7 +1046,7 @@ def read_fixed16_sprite_values(
     """Read the byte-aligned 16-bit GMC extension seen in retail VID1.
 
     Words are retained as signed Python integers for compatibility with the
-    legacy divisor mappings; packed-zigzag conversion reinterprets them as
+    legacy divisor mappings; packed conversion reinterprets them as
     unsigned 16-bit words before unfolding.  This reader deliberately does not
     otherwise assign MPEG-4 semantics to the values.
     The public VID1 notes label the source fields only tentatively, and the
@@ -1074,36 +1074,53 @@ def read_fixed16_sprite_values(
 
 
 def folded_signed_decode(code: int) -> int:
-    """Decode unsigned 0,-1,+1,-2,+2,... folding to a signed integer."""
+    """Decode legacy 0,-1,+1,-2,+2,... zig-zag folding.
+
+    This was the v4 interpretation.  It is retained only for the explicit
+    ``--fixed16-gmc-mode zigzag`` diagnostic mode.
+    """
     if code < 0:
         raise ValueError("folded signed code cannot be negative")
     return -(code // 2 + 1) if code & 1 else code // 2
 
 
-def fixed16_zigzag_shifts(config: SpriteConfig) -> tuple[int, int]:
+def signed_magnitude_decode(code: int) -> int:
+    """Decode the VID1 packed sign/magnitude representation.
+
+    The low bit is the sign and the remaining bits are the magnitude:
+    ``2*m`` means ``+m`` and ``2*m+1`` means ``-m``.  Code 1 is therefore a
+    redundant negative zero; the supplied retail stream never emits it.
+    """
+    if code < 0:
+        raise ValueError("signed-magnitude code cannot be negative")
+    magnitude = code >> 1
+    return -magnitude if code & 1 else magnitude
+
+
+def fixed16_packed_shifts(config: SpriteConfig) -> tuple[int, int]:
     """Return the observed horizontal/vertical packing shifts.
 
     The retail stream supplied with the bug report has sprite accuracy 3 and
-    stores the folded horizontal code in bits 15..2 and the folded vertical
+    stores the horizontal sign/magnitude code in bits 15..2 and the vertical
     code in bits 15..3.  No public VID1 document currently defines this layout,
     so do not silently generalise it to other accuracy values.
     """
     if config.accuracy != 3:
         raise VID1Error(
-            "the packed-zigzag fixed16 mapping is only verified for sprite "
+            "the packed fixed16 mapping is only verified for sprite "
             f"accuracy 3, not {config.accuracy}"
         )
     return 2, 3
 
 
-def fixed16_looks_like_zigzag(
+def fixed16_looks_like_packed(
     raw: Sequence[int],
     config: SpriteConfig,
 ) -> bool:
     if len(raw) != config.warping_points * 2 or not raw:
         return False
     try:
-        x_shift, y_shift = fixed16_zigzag_shifts(config)
+        x_shift, y_shift = fixed16_packed_shifts(config)
     except VID1Error:
         return False
     for component_index, signed_word in enumerate(raw):
@@ -1114,14 +1131,24 @@ def fixed16_looks_like_zigzag(
     return True
 
 
-def decode_fixed16_zigzag_values(
+def decode_fixed16_packed_values(
     raw: Sequence[int],
     config: SpriteConfig,
     *,
     frame_index: int,
+    signed_mode: str,
 ) -> tuple[int, ...]:
-    x_shift, y_shift = fixed16_zigzag_shifts(config)
+    """Decode the axis-shifted packed words into MPEG-4 trajectory values.
+
+    ``signed_mode='vid1'`` uses the sign/magnitude mapping confirmed by the
+    supplied stream.  ``signed_mode='zigzag'`` reproduces v4's off-by-one
+    negative mapping for comparison.
+    """
+    if signed_mode not in ("vid1", "zigzag"):
+        raise ValueError(f"unknown packed signed mode {signed_mode}")
+    x_shift, y_shift = fixed16_packed_shifts(config)
     converted: list[int] = []
+    decoder = signed_magnitude_decode if signed_mode == "vid1" else folded_signed_decode
     for component_index, signed_word in enumerate(raw):
         unsigned_word = signed_word & 0xFFFF
         shift = x_shift if component_index % 2 == 0 else y_shift
@@ -1129,10 +1156,10 @@ def decode_fixed16_zigzag_values(
         if unsigned_word & discarded_mask:
             axis = "x" if component_index % 2 == 0 else "y"
             raise VID1Error(
-                f"frame {frame_index}: packed-zigzag GMC {axis} word "
+                f"frame {frame_index}: packed GMC {axis} word "
                 f"0x{unsigned_word:04x} has non-zero low {shift} bit(s)"
             )
-        converted.append(folded_signed_decode(unsigned_word >> shift))
+        converted.append(decoder(unsigned_word >> shift))
     return tuple(converted)
 
 
@@ -1147,22 +1174,22 @@ def convert_fixed16_sprite_trajectory(
 ) -> tuple[tuple[int, ...], SpriteConfig, str]:
     """Map the proprietary byte-aligned 16-bit GMC representation.
 
-    ``zigzag`` is the lossless mapping identified from the supplied retail
-    stream: x is folded_signed(raw >> 2), y is folded_signed(raw >> 3), repeated
-    for each configured point.  The previously shipped ``translation`` and
-    ``points`` divisor mappings are retained only for comparison or other VID1
-    variants whose words do not match the packed-zigzag layout.
+    ``vid1`` is the mapping identified from the supplied retail stream:
+    x is signed_magnitude(raw >> 2), y is signed_magnitude(raw >> 3), repeated
+    for each configured point.  ``zigzag`` preserves v4's off-by-one negative
+    interpretation for comparison.  ``translation`` and ``points`` retain the
+    older divisor mappings for other VID1 variants.
     """
     if conversion_divisor <= 0:
         raise VID1Error("fixed16 GMC conversion divisor must be positive")
-    if requested_mapping not in ("auto", "zigzag", "translation", "points"):
+    if requested_mapping not in ("auto", "vid1", "zigzag", "translation", "points"):
         raise ValueError(f"unknown fixed16 GMC mapping {requested_mapping}")
 
     selected = requested_mapping
     if selected == "auto":
         if state.fixed16_mapping is None:
-            if fixed16_looks_like_zigzag(raw, source_config):
-                state.fixed16_mapping = "zigzag"
+            if fixed16_looks_like_packed(raw, source_config):
+                state.fixed16_mapping = "vid1"
             elif source_config.warping_points == 1:
                 state.fixed16_mapping = "translation"
             elif (
@@ -1175,14 +1202,15 @@ def convert_fixed16_sprite_trajectory(
                 state.fixed16_mapping = "points"
         selected = state.fixed16_mapping
 
-    if selected == "zigzag":
-        converted = decode_fixed16_zigzag_values(
+    if selected in ("vid1", "zigzag"):
+        converted = decode_fixed16_packed_values(
             raw,
             source_config,
             frame_index=frame_index,
+            signed_mode=selected,
         )
         output_config = source_config
-        mapping_name = "zigzag"
+        mapping_name = selected
     else:
         if selected == "translation":
             if len(raw) < 2:
@@ -1374,7 +1402,7 @@ def parse_picture(
             if gmc_format == "mpeg4" or state.gmc_format == "mpeg4":
                 state.output_sprite = source_sprite
             elif gmc_format == "fixed16":
-                if fixed16_mapping in ("points", "zigzag"):
+                if fixed16_mapping in ("points", "vid1", "zigzag"):
                     state.output_sprite = source_sprite
                 elif fixed16_mapping == "translation" and source_sprite.warping_points:
                     state.output_sprite = SpriteConfig(1, source_sprite.accuracy)
@@ -2666,7 +2694,7 @@ def ensure_output_available(path: Path, overwrite: bool) -> None:
 def choose_fixed16_gmc_divisor(requested: str) -> int:
     if requested == "auto":
         # Used only by the legacy translation/points mappings.  The verified
-        # packed-zigzag mapping is exact and does not use a divisor.
+        # packed VID1/zigzag mappings are exact and do not use a divisor.
         return 16
     try:
         divisor = int(requested, 0)
@@ -2757,13 +2785,19 @@ def convert(args: argparse.Namespace) -> None:
     fixed16_count = int(summary["gmc_formats"].get("fixed16", 0))
     if fixed16_count:
         mappings = summary["gmc_mappings"]
+        vid1_count = int(mappings.get("vid1", 0))
         zigzag_count = int(mappings.get("zigzag", 0))
-        legacy_count = fixed16_count - zigzag_count
-        if zigzag_count:
+        legacy_count = fixed16_count - vid1_count - zigzag_count
+        if vid1_count:
             reporter.status(
-                f"Packed GMC: {zigzag_count} S frame(s), "
-                "x=folded(raw>>2), y=folded(raw>>3), "
+                f"Packed VID1 GMC: {vid1_count} S frame(s), "
+                "x=signmag(raw>>2), y=signmag(raw>>3), "
                 f"mapping={mappings}"
+            )
+        if zigzag_count:
+            reporter.warn(
+                f"Legacy v4 zigzag GMC is active for {zigzag_count} S frame(s); "
+                "negative components are one half-pel larger than VID1 sign/magnitude"
             )
         if legacy_count:
             mode_note = (
@@ -3034,18 +3068,24 @@ def run_self_tests() -> None:
     writer.close()
     assert trimmed.getvalue() == b"\x80"
 
-    # Retail packed GMC words use folded signed codes with axis-specific shifts.
+    # Retail packed GMC words use sign/magnitude codes with axis-specific shifts.
     assert choose_fixed16_gmc_divisor("auto") == 16
-    assert folded_signed_decode(0) == 0
-    assert folded_signed_decode(1) == -1
-    assert folded_signed_decode(2) == 1
+    assert signed_magnitude_decode(0) == 0
+    assert signed_magnitude_decode(1) == 0  # redundant negative zero
+    assert signed_magnitude_decode(2) == 1
+    assert signed_magnitude_decode(3) == -1
+    assert signed_magnitude_decode(5) == -2
+    assert folded_signed_decode(5) == -3  # v4 compatibility mode
     sprite = SpriteConfig(2, 3)
-    assert decode_fixed16_zigzag_values(
-        (192, 256, 0, 0), sprite, frame_index=4
+    assert decode_fixed16_packed_values(
+        (192, 256, 0, 0), sprite, frame_index=4, signed_mode="vid1"
     ) == (24, 16, 0, 0)
-    assert decode_fixed16_zigzag_values(
-        (52, 424, 0, 0), sprite, frame_index=808
-    ) == (-7, -27, 0, 0)
+    assert decode_fixed16_packed_values(
+        (52, 424, 0, 0), sprite, frame_index=808, signed_mode="vid1"
+    ) == (-6, -26, 0, 0)
+    assert decode_fixed16_packed_values(
+        (8, 40, 0, 0), sprite, frame_index=1462, signed_mode="vid1"
+    ) == (1, -2, 0, 0)
     trajectory = encode_sprite_trajectory((24, 16, 0, 0), 2)
     packed = bytearray((len(trajectory) + 7) // 8)
     for bit_index, bit in enumerate(trajectory):
@@ -3093,7 +3133,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default="auto",
         help=(
             "S/GMC trajectory representation: standard MPEG-4 VLCs, or the "
-            "byte-aligned signed-16-bit fixed-point form found in retail VID1 files"
+            "byte-aligned packed 16-bit form found in retail VID1 files"
         ),
     )
     parser.add_argument(
@@ -3101,17 +3141,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default="auto",
         help=(
             "divisor used only by legacy translation/points mappings; "
-            "auto uses 16. The packed-zigzag mapping is exact and ignores it"
+            "auto uses 16. The packed VID1/zigzag mappings are exact and ignore it"
         ),
     )
     parser.add_argument(
         "--fixed16-gmc-mode",
-        choices=("auto", "zigzag", "translation", "points"),
+        choices=("auto", "vid1", "zigzag", "translation", "points"),
         default="auto",
         help=(
             "how proprietary 16-bit GMC words map to MPEG-4: auto detects "
-            "the retail packed-zigzag layout; zigzag forces x=folded(raw>>2) "
-            "and y=folded(raw>>3); translation/points retain legacy divisor mappings"
+            "the retail packed sign/magnitude layout; vid1 forces the corrected "
+            "x=signmag(raw>>2), y=signmag(raw>>3) mapping; zigzag reproduces v4; "
+            "translation/points retain legacy divisor mappings"
         ),
     )
     parser.add_argument(
