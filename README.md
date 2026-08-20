@@ -6,10 +6,10 @@ The Factor 5 VID1 ***video codec*** is [very similar to MPEG-4 ASP](https://wiki
 This seems to work for a good number of VID1 files, but there are many files this approach is incompatible with. To truly archive these videos, we need a proper VID1 video codec decoder (rather than my translator) so we can decode VID1 video streams into a lossless format (e.g. [FFV1](https://en.wikipedia.org/wiki/FFV1)).
 
 ## Usage: VID1 Decoder
-Basic usage of the [`vid1_decoder.py`](vid1_decoder.py) is as follows (and full usage details can be viewed using the `-h/--help` argument):
+Basic usage of the [`vid1_decode.py`](vid1_decode.py) is as follows (and full usage details can be viewed using the `-h/--help` argument):
 
 ```bash
-python3 vid1_decoder.py original.vid decoded.mkv
+python3 vid1_decode.py original.vid decoded.mkv
 ```
 
 This will decode the video stream of the input VID1 file `original.vid` and re-encode it to the lossless-compressed FFV1 video codec into the output file `decoded.mkv`.
