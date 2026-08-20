@@ -15,7 +15,13 @@ This is deliberately a decoder front-end, not another VID1-to-M4V deliverable:
 Only video is decoded; VID1 audio chunks are ignored.
 
 S/GMC pictures are accepted in either standard MPEG-4 trajectory syntax or
-the byte-aligned signed-16-bit fixed-point form used by retail VID1 streams.
+the byte-aligned 16-bit form used by retail VID1 streams.  In the supplied
+retail stream, those 16-bit words are not ordinary signed fixed-point values:
+the horizontal component stores a folded signed integer as ``raw >> 2`` and
+the vertical component stores one as ``raw >> 3``.  Even folded codes are
+non-negative and odd codes are negative.  Auto mode recognises that exact
+low-bit layout and writes the corresponding MPEG-4 sprite trajectory.  Legacy
+divisor-based mappings remain available as explicit compatibility options.
 
 Extended VID1 luma/chroma quantisation matrices do not map one-for-one onto
 MPEG-4 Part 2's intra/non-intra matrices.  For such pictures this program can
@@ -29,32 +35,41 @@ Examples:
 
     python3 vid1_decode.py input.vid output.mkv
     python3 vid1_decode.py input.vid output.y4m --format y4m
-    python3 vid1_decode.py input.vid output.mkv --fps 30000/1001 -v
+    python3 vid1_decode.py input.vid output.mkv --progress always -v
 
-The script has no third-party Python dependencies.  It requires an ffmpeg
-executable with the MPEG-4 Part 2 decoder and, for FFV1 output, the FFV1 encoder.
+The script requires an ffmpeg executable with the MPEG-4 Part 2 decoder and,
+for FFV1 output, the FFV1 encoder.  It uses tqdm progress bars when tqdm is
+installed and falls back to a built-in progress display otherwise.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
-from typing import BinaryIO, Iterable, Optional, Sequence, Union
+from typing import BinaryIO, Iterable, Iterator, Optional, Sequence, Union
+
+try:
+    from tqdm import tqdm as _tqdm
+except ImportError:  # tqdm is optional; a built-in fallback is provided.
+    _tqdm = None
 
 
 ByteBuffer = Union[bytes, memoryview]
 
 
 PROGRAM = "vid1_decode.py"
-VERSION = "2.0"
+VERSION = "4.0"
 
 
 def tag(text: str) -> int:
@@ -316,6 +331,9 @@ class Picture:
     display_index: int = -1
     gmc_source_format: Optional[str] = None
     gmc_raw_values: tuple[int, ...] = ()
+    source_sprite_config: Optional[SpriteConfig] = None
+    gmc_mapping: Optional[str] = None
+    gmc_conversion_divisor: Optional[int] = None
 
     @property
     def frame_name(self) -> str:
@@ -324,10 +342,16 @@ class Picture:
 
 @dataclass
 class ParseState:
-    sprite: Optional[SpriteConfig] = None
+    # VID1's 2-bit sprite field is not documented precisely enough to assume
+    # that it is identical to MPEG-4's 6-bit num_sprite_warping_points field.
+    # Keep the source-side state separate from the MPEG-4 VOL state that we
+    # synthesize for FFmpeg.
+    source_sprite: Optional[SpriteConfig] = None
+    output_sprite: Optional[SpriteConfig] = None
     luma_matrix: Optional[tuple[int, ...]] = None
     chroma_matrix: Optional[tuple[int, ...]] = None
     gmc_format: Optional[str] = None
+    fixed16_mapping: Optional[str] = None
 
 
 @dataclass
@@ -355,6 +379,13 @@ class DecodeResult:
 
 
 @dataclass(frozen=True)
+class FFmpegRunResult:
+    stderr: str
+    frame_count: Optional[int]
+    elapsed: float
+
+
+@dataclass(frozen=True)
 class SkipProbe:
     skip: int
     score: int
@@ -363,19 +394,266 @@ class SkipProbe:
     error: Optional[str]
 
 
+def format_duration(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remainder = divmod(int(round(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{remainder:02d}"
+    return f"{minutes:d}:{remainder:02d}"
+
+
+def format_size(byte_count: int) -> str:
+    value = float(max(0, byte_count))
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    raise AssertionError("unreachable")
+
+
+class _NullProgress:
+    def __enter__(self) -> "_NullProgress":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def update(self, amount: int = 1) -> None:
+        return None
+
+    def update_to(self, value: int) -> None:
+        return None
+
+
+class _TqdmProgress:
+    def __init__(
+        self,
+        *,
+        total: Optional[int],
+        description: str,
+        unit: str,
+        unit_scale: bool,
+    ) -> None:
+        assert _tqdm is not None
+        self._bar = _tqdm(
+            total=total,
+            desc=description,
+            unit=unit,
+            unit_scale=unit_scale,
+            unit_divisor=1024,
+            dynamic_ncols=True,
+            leave=True,
+            file=sys.stderr,
+            mininterval=0.15,
+            smoothing=0.15,
+        )
+
+    def __enter__(self) -> "_TqdmProgress":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self._bar.close()
+
+    def update(self, amount: int = 1) -> None:
+        if amount > 0:
+            self._bar.update(amount)
+
+    def update_to(self, value: int) -> None:
+        delta = value - int(self._bar.n)
+        if delta > 0:
+            self._bar.update(delta)
+
+
+class _SimpleProgress:
+    """Small stderr progress fallback used when tqdm is not installed."""
+
+    def __init__(
+        self,
+        *,
+        total: Optional[int],
+        description: str,
+        unit: str,
+        unit_scale: bool,
+    ) -> None:
+        self.total = total
+        self.description = description
+        self.unit = unit
+        self.unit_scale = unit_scale
+        self.value = 0
+        self.started = time.monotonic()
+        self.last_print = 0.0
+        self.last_percent = -1
+        self.tty = sys.stderr.isatty()
+
+    def __enter__(self) -> "_SimpleProgress":
+        self._render(force=True)
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self.total is not None and exc_type is None:
+            self.value = max(self.value, self.total)
+        self._render(force=True, final=True)
+
+    def update(self, amount: int = 1) -> None:
+        self.update_to(self.value + amount)
+
+    def update_to(self, value: int) -> None:
+        self.value = max(self.value, value)
+        self._render()
+
+    def _quantity(self, value: int) -> str:
+        if self.unit_scale and self.unit == "B":
+            return format_size(value)
+        return f"{value} {self.unit}"
+
+    def _render(self, *, force: bool = False, final: bool = False) -> None:
+        now = time.monotonic()
+        percent: Optional[int] = None
+        if self.total:
+            percent = min(100, int(self.value * 100 / self.total))
+        if not force:
+            if self.tty:
+                if now - self.last_print < 0.5:
+                    return
+            else:
+                bucket = -1 if percent is None else percent // 10
+                if bucket == self.last_percent and now - self.last_print < 5.0:
+                    return
+                self.last_percent = bucket
+        elapsed = max(now - self.started, 1e-9)
+        rate = self.value / elapsed
+        if self.total is None:
+            message = f"{self.description}: {self._quantity(self.value)}"
+        else:
+            message = (
+                f"{self.description}: {percent:3d}% "
+                f"({self._quantity(self.value)}/{self._quantity(self.total)})"
+            )
+        if self.unit_scale and self.unit == "B":
+            message += f" [{format_size(int(rate))}/s]"
+        else:
+            message += f" [{rate:.1f} {self.unit}/s]"
+        if self.tty and not final:
+            print("\r" + message, end="", file=sys.stderr, flush=True)
+        else:
+            if self.tty:
+                print("\r" + message, file=sys.stderr, flush=True)
+            else:
+                print(message, file=sys.stderr, flush=True)
+        self.last_print = now
+
+
 class Reporter:
-    def __init__(self, verbose: int = 0):
+    def __init__(
+        self,
+        verbose: int = 0,
+        *,
+        quiet: bool = False,
+        progress_mode: str = "auto",
+        ffmpeg_log: Optional[Path] = None,
+    ) -> None:
         self.verbose = verbose
+        self.quiet = quiet
+        self.progress_mode = progress_mode
+        self.ffmpeg_log = ffmpeg_log
+        self.started = time.monotonic()
         self._warnings: list[str] = []
 
+    @property
+    def progress_enabled(self) -> bool:
+        if self.quiet or self.progress_mode == "never":
+            return False
+        if self.progress_mode == "always":
+            return True
+        return sys.stderr.isatty()
+
+    def status(self, message: str) -> None:
+        if not self.quiet:
+            print(f"[vid1] {message}", file=sys.stderr, flush=True)
+
     def info(self, message: str, level: int = 1) -> None:
-        if self.verbose >= level:
-            print(message, file=sys.stderr)
+        if not self.quiet and self.verbose >= level:
+            print(f"[vid1] {message}", file=sys.stderr, flush=True)
 
     def warn(self, message: str) -> None:
         if message not in self._warnings:
             self._warnings.append(message)
-            print(f"warning: {message}", file=sys.stderr)
+            print(f"[vid1] warning: {message}", file=sys.stderr, flush=True)
+
+    @contextlib.contextmanager
+    def phase(self, message: str) -> Iterator[None]:
+        self.status(message)
+        started = time.monotonic()
+        try:
+            yield
+        except Exception:
+            self.status(f"{message} failed after {format_duration(time.monotonic() - started)}")
+            raise
+        else:
+            self.info(
+                f"{message} completed in {format_duration(time.monotonic() - started)}",
+                level=1,
+            )
+
+    def progress(
+        self,
+        *,
+        total: Optional[int],
+        description: str,
+        unit: str = "frame",
+        unit_scale: bool = False,
+    ) -> Union[_NullProgress, _TqdmProgress, _SimpleProgress]:
+        if not self.progress_enabled:
+            return _NullProgress()
+        if _tqdm is not None:
+            return _TqdmProgress(
+                total=total,
+                description=description,
+                unit=unit,
+                unit_scale=unit_scale,
+            )
+        return _SimpleProgress(
+            total=total,
+            description=description,
+            unit=unit,
+            unit_scale=unit_scale,
+        )
+
+    def track(
+        self,
+        iterable: Iterable[object],
+        *,
+        total: Optional[int],
+        description: str,
+        unit: str = "frame",
+    ) -> Iterator[object]:
+        with self.progress(total=total, description=description, unit=unit) as progress:
+            for item in iterable:
+                yield item
+                progress.update(1)
+
+    def record_ffmpeg_log(
+        self,
+        *,
+        description: str,
+        command: Sequence[str],
+        stderr: str,
+    ) -> None:
+        if self.ffmpeg_log is None:
+            return
+        self.ffmpeg_log.parent.mkdir(parents=True, exist_ok=True)
+        with self.ffmpeg_log.open("a", encoding="utf-8", errors="replace") as log:
+            log.write(f"\n===== {description} =====\n")
+            log.write("$ " + " ".join(shlex.quote(part) for part in command) + "\n")
+            log.write(stderr)
+            if stderr and not stderr.endswith("\n"):
+                log.write("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -547,83 +825,113 @@ def read_video_chunks(
     *,
     resync_scan: bool,
     max_chunk_size: int,
+    reporter: Optional[Reporter] = None,
+    input_size: Optional[int] = None,
 ) -> list[RawVideoChunk]:
     chunks: list[RawVideoChunk] = []
     big_endian = info.big_endian
-    stream.seek(info.start_offset)
+    start_offset = info.start_offset
+    stream.seek(start_offset)
 
-    while True:
-        position = stream.tell()
-        try:
-            magic = read_u32(stream, big_endian)
-        except EOFError:
-            break
+    total_bytes: Optional[int] = None
+    if input_size is not None:
+        total_bytes = max(0, input_size - start_offset)
+    progress_context = (
+        reporter.progress(
+            total=total_bytes,
+            description="Scanning VID1 container",
+            unit="B",
+            unit_scale=True,
+        )
+        if reporter is not None
+        else _NullProgress()
+    )
 
-        if magic == TAG_FRAM:
-            # The current librempeg demuxer skips the 28-byte FRAM subheader
-            # and then reads the nested VIDD/AUDD tag.
-            stream.seek(28, io.SEEK_CUR)
+    with progress_context as progress:
+        while True:
             position = stream.tell()
+            progress.update_to(max(0, position - start_offset))
             try:
                 magic = read_u32(stream, big_endian)
             except EOFError:
                 break
 
-        if magic == TAG_VIDD:
-            try:
-                chunk_size = read_u32(stream, big_endian)
-            except EOFError as exc:
-                raise VID1Error(f"truncated VIDD size at 0x{position:x}") from exc
-            if chunk_size < 8 or chunk_size > max_chunk_size:
-                raise VID1Error(f"invalid VIDD chunk size {chunk_size} at 0x{position:x}")
-            try:
-                body = read_exact(stream, chunk_size - 8)
-            except EOFError as exc:
-                raise VID1Error(f"truncated VIDD chunk at 0x{position:x}") from exc
-            chunks.append(
-                RawVideoChunk(
-                    index=len(chunks),
-                    file_offset=position,
-                    chunk_size=chunk_size,
-                    body=body,
+            if magic == TAG_FRAM:
+                # The current librempeg demuxer skips the 28-byte FRAM
+                # subheader and then reads the nested VIDD/AUDD tag.
+                stream.seek(28, io.SEEK_CUR)
+                position = stream.tell()
+                try:
+                    magic = read_u32(stream, big_endian)
+                except EOFError:
+                    break
+
+            if magic == TAG_VIDD:
+                try:
+                    chunk_size = read_u32(stream, big_endian)
+                except EOFError as exc:
+                    raise VID1Error(f"truncated VIDD size at 0x{position:x}") from exc
+                if chunk_size < 8 or chunk_size > max_chunk_size:
+                    raise VID1Error(
+                        f"invalid VIDD chunk size {chunk_size} at 0x{position:x}"
+                    )
+                try:
+                    body = read_exact(stream, chunk_size - 8)
+                except EOFError as exc:
+                    raise VID1Error(f"truncated VIDD chunk at 0x{position:x}") from exc
+                chunks.append(
+                    RawVideoChunk(
+                        index=len(chunks),
+                        file_offset=position,
+                        chunk_size=chunk_size,
+                        body=body,
+                    )
                 )
-            )
-            continue
+                progress.update_to(max(0, stream.tell() - start_offset))
+                continue
 
-        if magic == TAG_AUDD:
+            if magic == TAG_AUDD:
+                try:
+                    chunk_size = read_u32(stream, big_endian)
+                except EOFError as exc:
+                    raise VID1Error(f"truncated AUDD size at 0x{position:x}") from exc
+                if chunk_size < 8 or chunk_size > max_chunk_size:
+                    raise VID1Error(
+                        f"invalid AUDD chunk size {chunk_size} at 0x{position:x}"
+                    )
+                stream.seek(position + chunk_size)
+                progress.update_to(max(0, stream.tell() - start_offset))
+                continue
+
+            if magic == 0:
+                remainder = stream.read()
+                if not remainder or all(value == 0 for value in remainder):
+                    break
+                stream.seek(position + 4)
+
+            # Vorbis audio may appear as a bare variable-length packet between
+            # regular chunks.  Skip it when the header is sane; otherwise
+            # either fail or scan to the next known tag.
             try:
-                chunk_size = read_u32(stream, big_endian)
-            except EOFError as exc:
-                raise VID1Error(f"truncated AUDD size at 0x{position:x}") from exc
-            if chunk_size < 8 or chunk_size > max_chunk_size:
-                raise VID1Error(f"invalid AUDD chunk size {chunk_size} at 0x{position:x}")
-            stream.seek(position + chunk_size)
-            continue
+                header_length, packet_size = parse_variable_packet_header_at(
+                    stream, position
+                )
+                if packet_size <= 0 or packet_size > max_chunk_size:
+                    raise VID1Error("unreasonable bare audio packet size")
+                stream.seek(position + header_length + packet_size)
+            except Exception as exc:
+                if not resync_scan:
+                    raise VID1Error(
+                        f"unknown chunk/tag 0x{magic:08x} at 0x{position:x}; "
+                        "use --resync-scan for files with unusual bare audio packets"
+                    ) from exc
+                next_position = find_next_known_chunk(stream, big_endian, position + 1)
+                if next_position is None:
+                    break
+                stream.seek(next_position)
 
-        if magic == 0:
-            remainder = stream.read()
-            if not remainder or all(value == 0 for value in remainder):
-                break
-            stream.seek(position + 4)
-
-        # Vorbis audio may appear as a bare variable-length packet between
-        # regular chunks.  Skip it when the header is sane; otherwise either
-        # fail or scan to the next known tag.
-        try:
-            header_length, packet_size = parse_variable_packet_header_at(stream, position)
-            if packet_size <= 0 or packet_size > max_chunk_size:
-                raise VID1Error("unreasonable bare audio packet size")
-            stream.seek(position + header_length + packet_size)
-        except Exception as exc:
-            if not resync_scan:
-                raise VID1Error(
-                    f"unknown chunk/tag 0x{magic:08x} at 0x{position:x}; "
-                    "use --resync-scan for files with unusual bare audio packets"
-                ) from exc
-            next_position = find_next_known_chunk(stream, big_endian, position + 1)
-            if next_position is None:
-                break
-            stream.seek(next_position)
+        if total_bytes is not None:
+            progress.update_to(total_bytes)
 
     if not chunks:
         raise VID1Error("no VIDD video chunks were found")
@@ -731,14 +1039,20 @@ def rounded_divide(value: int, divisor: int) -> int:
     return -((-value + divisor // 2) // divisor)
 
 
-def read_fixed16_sprite_trajectory(
-    bits: BitReaderMSB, config: SpriteConfig
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    # The retail sample supplied with the bug report stores the GMC values as
-    # byte-aligned, big-endian signed 16-bit fixed-point components rather
-    # than MPEG-4's variable-length trajectory syntax.  There are x/y values
-    # for each configured warping point.  The fixed-point scale is the same
-    # 2 << accuracy factor used by MPEG-4's GMC equations.
+def read_fixed16_sprite_values(
+    bits: BitReaderMSB,
+    config: SpriteConfig,
+) -> tuple[int, ...]:
+    """Read the byte-aligned 16-bit GMC extension seen in retail VID1.
+
+    Words are retained as signed Python integers for compatibility with the
+    legacy divisor mappings; packed-zigzag conversion reinterprets them as
+    unsigned 16-bit words before unfolding.  This reader deliberately does not
+    otherwise assign MPEG-4 semantics to the values.
+    The public VID1 notes label the source fields only tentatively, and the
+    supplied stream uses a two-component non-zero prefix followed by zero
+    components.  Semantic conversion is handled separately below.
+    """
     padding = (-bits.bitpos) & 7
     if padding and bits.read(padding) != 0:
         raise VID1Error("non-zero padding before fixed16 GMC data")
@@ -756,10 +1070,152 @@ def read_fixed16_sprite_trajectory(
         if value & 0x8000:
             value -= 0x10000
         raw.append(value)
+    return tuple(raw)
 
-    scale = 2 << config.accuracy
-    converted = tuple(rounded_divide(value, scale) for value in raw)
-    return encode_sprite_trajectory(converted, config.warping_points), tuple(raw)
+
+def folded_signed_decode(code: int) -> int:
+    """Decode unsigned 0,-1,+1,-2,+2,... folding to a signed integer."""
+    if code < 0:
+        raise ValueError("folded signed code cannot be negative")
+    return -(code // 2 + 1) if code & 1 else code // 2
+
+
+def fixed16_zigzag_shifts(config: SpriteConfig) -> tuple[int, int]:
+    """Return the observed horizontal/vertical packing shifts.
+
+    The retail stream supplied with the bug report has sprite accuracy 3 and
+    stores the folded horizontal code in bits 15..2 and the folded vertical
+    code in bits 15..3.  No public VID1 document currently defines this layout,
+    so do not silently generalise it to other accuracy values.
+    """
+    if config.accuracy != 3:
+        raise VID1Error(
+            "the packed-zigzag fixed16 mapping is only verified for sprite "
+            f"accuracy 3, not {config.accuracy}"
+        )
+    return 2, 3
+
+
+def fixed16_looks_like_zigzag(
+    raw: Sequence[int],
+    config: SpriteConfig,
+) -> bool:
+    if len(raw) != config.warping_points * 2 or not raw:
+        return False
+    try:
+        x_shift, y_shift = fixed16_zigzag_shifts(config)
+    except VID1Error:
+        return False
+    for component_index, signed_word in enumerate(raw):
+        unsigned_word = signed_word & 0xFFFF
+        shift = x_shift if component_index % 2 == 0 else y_shift
+        if unsigned_word & ((1 << shift) - 1):
+            return False
+    return True
+
+
+def decode_fixed16_zigzag_values(
+    raw: Sequence[int],
+    config: SpriteConfig,
+    *,
+    frame_index: int,
+) -> tuple[int, ...]:
+    x_shift, y_shift = fixed16_zigzag_shifts(config)
+    converted: list[int] = []
+    for component_index, signed_word in enumerate(raw):
+        unsigned_word = signed_word & 0xFFFF
+        shift = x_shift if component_index % 2 == 0 else y_shift
+        discarded_mask = (1 << shift) - 1
+        if unsigned_word & discarded_mask:
+            axis = "x" if component_index % 2 == 0 else "y"
+            raise VID1Error(
+                f"frame {frame_index}: packed-zigzag GMC {axis} word "
+                f"0x{unsigned_word:04x} has non-zero low {shift} bit(s)"
+            )
+        converted.append(folded_signed_decode(unsigned_word >> shift))
+    return tuple(converted)
+
+
+def convert_fixed16_sprite_trajectory(
+    raw: Sequence[int],
+    source_config: SpriteConfig,
+    *,
+    conversion_divisor: int,
+    requested_mapping: str,
+    state: ParseState,
+    frame_index: int,
+) -> tuple[tuple[int, ...], SpriteConfig, str]:
+    """Map the proprietary byte-aligned 16-bit GMC representation.
+
+    ``zigzag`` is the lossless mapping identified from the supplied retail
+    stream: x is folded_signed(raw >> 2), y is folded_signed(raw >> 3), repeated
+    for each configured point.  The previously shipped ``translation`` and
+    ``points`` divisor mappings are retained only for comparison or other VID1
+    variants whose words do not match the packed-zigzag layout.
+    """
+    if conversion_divisor <= 0:
+        raise VID1Error("fixed16 GMC conversion divisor must be positive")
+    if requested_mapping not in ("auto", "zigzag", "translation", "points"):
+        raise ValueError(f"unknown fixed16 GMC mapping {requested_mapping}")
+
+    selected = requested_mapping
+    if selected == "auto":
+        if state.fixed16_mapping is None:
+            if fixed16_looks_like_zigzag(raw, source_config):
+                state.fixed16_mapping = "zigzag"
+            elif source_config.warping_points == 1:
+                state.fixed16_mapping = "translation"
+            elif (
+                source_config.warping_points >= 2
+                and len(raw) >= 4
+                and all(value == 0 for value in raw[2:])
+            ):
+                state.fixed16_mapping = "translation"
+            else:
+                state.fixed16_mapping = "points"
+        selected = state.fixed16_mapping
+
+    if selected == "zigzag":
+        converted = decode_fixed16_zigzag_values(
+            raw,
+            source_config,
+            frame_index=frame_index,
+        )
+        output_config = source_config
+        mapping_name = "zigzag"
+    else:
+        if selected == "translation":
+            if len(raw) < 2:
+                raise VID1Error(
+                    f"frame {frame_index}: fixed16 translation needs an x/y pair"
+                )
+            if (
+                requested_mapping == "auto"
+                and len(raw) > 2
+                and any(value != 0 for value in raw[2:])
+            ):
+                raise VID1Error(
+                    f"frame {frame_index}: fixed16 GMC auto-detection selected the "
+                    "one-point translation layout, but a later frame has non-zero "
+                    "trailing components; retry with --fixed16-gmc-mode points"
+                )
+            source_values = tuple(raw[:2])
+            output_config = SpriteConfig(
+                warping_points=1,
+                accuracy=source_config.accuracy,
+            )
+            mapping_name = "translation"
+        else:
+            source_values = tuple(raw)
+            output_config = source_config
+            mapping_name = "points"
+
+        converted = tuple(
+            rounded_divide(value, conversion_divisor) for value in source_values
+        )
+
+    trajectory = encode_sprite_trajectory(converted, output_config.warping_points)
+    return trajectory, output_config, mapping_name
 
 
 def parse_sprite_trajectory(
@@ -769,7 +1225,15 @@ def parse_sprite_trajectory(
     requested_format: str,
     state: ParseState,
     frame_index: int,
-) -> tuple[tuple[int, ...], str, tuple[int, ...]]:
+    fixed16_divisor: int,
+    fixed16_mapping: str,
+) -> tuple[
+    tuple[int, ...],
+    str,
+    tuple[int, ...],
+    SpriteConfig,
+    str,
+]:
     selected = state.gmc_format if requested_format == "auto" else requested_format
     if selected is None:
         selected = "auto"
@@ -781,7 +1245,8 @@ def parse_sprite_trajectory(
             trajectory = read_sprite_trajectory(bits, config.warping_points)
             if requested_format == "auto":
                 state.gmc_format = "mpeg4"
-            return trajectory, "mpeg4", ()
+            state.output_sprite = config
+            return trajectory, "mpeg4", (), config, "mpeg4"
         except VID1Error as exc:
             bits.bitpos = start
             errors.append(f"mpeg4: {exc}")
@@ -791,10 +1256,25 @@ def parse_sprite_trajectory(
     if selected in ("auto", "fixed16"):
         start = bits.bitpos
         try:
-            trajectory, raw = read_fixed16_sprite_trajectory(bits, config)
+            raw = read_fixed16_sprite_values(bits, config)
+            trajectory, output_config, mapping_name = convert_fixed16_sprite_trajectory(
+                raw,
+                config,
+                conversion_divisor=fixed16_divisor,
+                requested_mapping=fixed16_mapping,
+                state=state,
+                frame_index=frame_index,
+            )
             if requested_format == "auto":
                 state.gmc_format = "fixed16"
-            return trajectory, "fixed16", raw
+            state.output_sprite = output_config
+            return (
+                trajectory,
+                "fixed16",
+                raw,
+                output_config,
+                mapping_name,
+            )
         except VID1Error as exc:
             bits.bitpos = start
             errors.append(f"fixed16: {exc}")
@@ -862,6 +1342,8 @@ def parse_picture(
     matrix_order: str,
     lenient: bool,
     gmc_format: str,
+    fixed16_divisor: int,
+    fixed16_mapping: str,
 ) -> Picture:
     if len(packet) < 8:
         raise VID1Error(f"frame {index}: packet is only {len(packet)} bytes")
@@ -871,7 +1353,8 @@ def parse_picture(
     frame_type = bits.read(2)
     extended = bool(bits.read_bit())
 
-    active_sprite = state.sprite
+    source_sprite = state.source_sprite
+    output_sprite = state.output_sprite
     uses_extended_quant = False
     luma_order: Optional[str] = None
     chroma_order: Optional[str] = None
@@ -879,11 +1362,23 @@ def parse_picture(
     if extended:
         sprite_present = bool(bits.read_bit())
         if sprite_present:
-            active_sprite = SpriteConfig(
+            source_sprite = SpriteConfig(
                 warping_points=bits.read(2),
                 accuracy=bits.read(2),
             )
-            state.sprite = active_sprite
+            state.source_sprite = source_sprite
+            # For explicit modes the output VOL shape can be known before the
+            # first S picture.  In auto mode, defer until the first trajectory
+            # reveals whether the proprietary fixed16 zero-tail layout is in
+            # use.
+            if gmc_format == "mpeg4" or state.gmc_format == "mpeg4":
+                state.output_sprite = source_sprite
+            elif gmc_format == "fixed16":
+                if fixed16_mapping in ("points", "zigzag"):
+                    state.output_sprite = source_sprite
+                elif fixed16_mapping == "translation" and source_sprite.warping_points:
+                    state.output_sprite = SpriteConfig(1, source_sprite.accuracy)
+            output_sprite = state.output_sprite
 
         uses_extended_quant = bool(bits.read_bit())
         if uses_extended_quant:
@@ -923,18 +1418,29 @@ def parse_picture(
     trajectory: tuple[int, ...] = ()
     gmc_source_format: Optional[str] = None
     gmc_raw_values: tuple[int, ...] = ()
+    gmc_mapping: Optional[str] = None
     if frame_type == 3:
-        if active_sprite is None:
+        if source_sprite is None:
             raise VID1Error(
                 f"frame {index}: S/GMC frame has no active sprite configuration"
             )
-        trajectory, gmc_source_format, gmc_raw_values = parse_sprite_trajectory(
+        (
+            trajectory,
+            gmc_source_format,
+            gmc_raw_values,
+            output_sprite,
+            gmc_mapping,
+        ) = parse_sprite_trajectory(
             bits,
-            active_sprite,
+            source_sprite,
             requested_format=gmc_format,
             state=state,
             frame_index=index,
+            fixed16_divisor=fixed16_divisor,
+            fixed16_mapping=fixed16_mapping,
         )
+    else:
+        output_sprite = state.output_sprite
 
     bits.align_byte()
     payload = packet[bits.bytepos :]
@@ -966,7 +1472,7 @@ def parse_picture(
         payload=payload,
         ignored16=ignored16,
         extended_info_present=extended,
-        sprite_config=active_sprite,
+        sprite_config=output_sprite,
         trajectory_bits=trajectory,
         uses_extended_quant=uses_extended_quant,
         luma_quant=luma_pair,
@@ -975,6 +1481,14 @@ def parse_picture(
         matrix_order_chroma=chroma_order,
         gmc_source_format=gmc_source_format,
         gmc_raw_values=gmc_raw_values,
+        source_sprite_config=source_sprite,
+        gmc_mapping=gmc_mapping,
+        gmc_conversion_divisor=(
+            fixed16_divisor
+            if gmc_source_format == "fixed16"
+            and gmc_mapping in ("translation", "points")
+            else None
+        ),
     )
 
 
@@ -985,14 +1499,26 @@ def parse_picture_sequence(
     matrix_order: str,
     lenient: bool,
     gmc_format: str,
+    fixed16_divisor: int,
+    fixed16_mapping: str,
     limit: Optional[int] = None,
+    reporter: Optional[Reporter] = None,
+    progress_description: str = "Parsing VID1 pictures",
 ) -> list[Picture]:
     if header_skip < 0:
         raise VID1Error("VIDD header skip must be non-negative")
     state = ParseState()
     pictures: list[Picture] = []
     selected = chunks if limit is None else chunks[:limit]
-    for chunk in selected:
+    iterable: Iterable[RawVideoChunk] = selected
+    if reporter is not None:
+        iterable = reporter.track(
+            selected,
+            total=len(selected),
+            description=progress_description,
+            unit="frame",
+        )
+    for chunk in iterable:
         if len(chunk.body) <= header_skip:
             raise VID1Error(
                 f"frame {chunk.index}: VIDD body is {len(chunk.body)} bytes, "
@@ -1011,6 +1537,8 @@ def parse_picture_sequence(
             matrix_order=matrix_order,
             lenient=lenient,
             gmc_format=gmc_format,
+            fixed16_divisor=fixed16_divisor,
+            fixed16_mapping=fixed16_mapping,
         )
         pictures.append(picture)
     return pictures
@@ -1023,6 +1551,8 @@ def probe_header_skip(
     matrix_order: str,
     probe_frames: int,
     gmc_format: str,
+    fixed16_divisor: int,
+    fixed16_mapping: str,
 ) -> SkipProbe:
     try:
         pictures = parse_picture_sequence(
@@ -1031,6 +1561,8 @@ def probe_header_skip(
             matrix_order=matrix_order,
             lenient=True,
             gmc_format=gmc_format,
+            fixed16_divisor=fixed16_divisor,
+            fixed16_mapping=fixed16_mapping,
             limit=probe_frames,
         )
     except Exception as exc:
@@ -1071,6 +1603,8 @@ def choose_header_skip(
     matrix_order: str,
     probe_frames: int,
     gmc_format: str,
+    fixed16_divisor: int,
+    fixed16_mapping: str,
     reporter: Reporter,
 ) -> tuple[int, list[SkipProbe]]:
     if requested != "auto":
@@ -1090,6 +1624,8 @@ def choose_header_skip(
             matrix_order=matrix_order,
             probe_frames=probe_frames,
             gmc_format=gmc_format,
+            fixed16_divisor=fixed16_divisor,
+            fixed16_mapping=fixed16_mapping,
         )
         for candidate in candidates
     ]
@@ -1468,6 +2004,9 @@ def write_adapted_stream(
     output: Path,
     pictures: Sequence[Picture],
     config: AdapterConfig,
+    *,
+    reporter: Optional[Reporter] = None,
+    progress_description: str = "Writing MPEG-4 adapter",
 ) -> None:
     time_state = MPEG4TimeState(time_resolution=config.fps.numerator)
     previous_vol_key: object = object()
@@ -1476,7 +2015,15 @@ def write_adapted_stream(
         writer = BitWriter(stream)
         write_visual_object_prefix(writer)
 
-        for picture in pictures:
+        iterable: Iterable[Picture] = pictures
+        if reporter is not None:
+            iterable = reporter.track(
+                pictures,
+                total=len(pictures),
+                description=progress_description,
+                unit="frame",
+            )
+        for picture in iterable:
             quant_pair = selected_quant_pair(picture, config.matrix_plane)
             # Sprite/GMC parameters are VOL state, not per-VOP state.  Once the
             # VID1 header has supplied them, keep them active for ordinary I/P/B
@@ -1517,26 +2064,128 @@ def executable_or_error(name: str) -> str:
     return candidate
 
 
-def run_command(command: Sequence[str], reporter: Reporter, *, description: str) -> str:
-    reporter.info("+ " + " ".join(command), level=2)
-    process = subprocess.run(
-        list(command),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="replace",
-        check=False,
+def run_ffmpeg(
+    command: Sequence[str],
+    reporter: Reporter,
+    *,
+    description: str,
+    expected_frames: Optional[int] = None,
+) -> FFmpegRunResult:
+    """Run one ffmpeg command while consuming ``-progress`` output live."""
+    if not command:
+        raise ValueError("empty ffmpeg command")
+
+    # Every command built by this script has exactly one output and its path is
+    # the final argument.  Inject ffmpeg's machine-readable progress protocol
+    # immediately before that output path, leaving stdout free of media data.
+    full_command = list(command[:-1]) + [
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        command[-1],
+    ]
+    reporter.info(
+        "+ " + " ".join(shlex.quote(part) for part in full_command),
+        level=2,
     )
-    stderr = process.stderr or ""
-    if process.returncode != 0:
+    reporter.status(description)
+    started = time.monotonic()
+    last_frame: Optional[int] = None
+
+    with tempfile.TemporaryFile(
+        mode="w+t",
+        encoding="utf-8",
+        errors="replace",
+    ) as error_stream:
+        process = subprocess.Popen(
+            full_command,
+            stdout=subprocess.PIPE,
+            stderr=error_stream,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        try:
+            with reporter.progress(
+                total=expected_frames,
+                description=description,
+                unit="frame",
+            ) as progress:
+                for raw_line in process.stdout:
+                    line = raw_line.strip()
+                    if "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    if key == "frame":
+                        try:
+                            frame = int(value.strip())
+                        except ValueError:
+                            continue
+                        if frame >= 0:
+                            last_frame = frame
+                            progress.update_to(frame)
+                return_code = process.wait()
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+
+        error_stream.seek(0)
+        stderr = error_stream.read()
+
+    elapsed = time.monotonic() - started
+    reporter.record_ffmpeg_log(
+        description=description,
+        command=full_command,
+        stderr=stderr,
+    )
+    if return_code != 0:
         tail = "\n".join(stderr.rstrip().splitlines()[-40:])
         raise ExternalToolError(
-            f"{description} failed with exit status {process.returncode}"
+            f"{description} failed with exit status {return_code}"
             + (f":\n{tail}" if tail else "")
         )
+
     if reporter.verbose >= 3 and stderr.strip():
         print(stderr.rstrip(), file=sys.stderr)
-    return stderr
+    frame_text = f", {last_frame} frames" if last_frame is not None else ""
+    reporter.status(
+        f"{description} completed in {format_duration(elapsed)}{frame_text}"
+    )
+    return FFmpegRunResult(
+        stderr=stderr,
+        frame_count=last_frame,
+        elapsed=elapsed,
+    )
+
+
+def warn_on_ffmpeg_damage(stderr: str, reporter: Reporter) -> None:
+    markers = ("damaged", "invalid data", "corrupt", "conceal", "error while")
+    diagnostic_lines = [
+        line
+        for line in stderr.splitlines()
+        if any(marker in line.lower() for marker in markers)
+    ]
+    if not diagnostic_lines:
+        return
+    reporter.warn(
+        f"ffmpeg emitted {len(diagnostic_lines)} possible bitstream-damage "
+        "diagnostic line(s); use -vvv or --ffmpeg-log PATH for details"
+    )
+    if reporter.verbose >= 2:
+        for line in diagnostic_lines[:10]:
+            reporter.info(f"ffmpeg: {line}", level=2)
+        if len(diagnostic_lines) > 10:
+            reporter.info(
+                f"ffmpeg: ... {len(diagnostic_lines) - 10} more matching line(s)",
+                level=2,
+            )
 
 
 def yuv420_frame_size(width: int, height: int) -> int:
@@ -1555,23 +2204,20 @@ def count_raw_frames(path: Path, width: int, height: int) -> int:
     return total // frame_size
 
 
-def decode_m4v_to_raw(
+def m4v_decode_prefix(
     ffmpeg: str,
     adapted: Path,
-    raw_output: Path,
     *,
-    width: int,
-    height: int,
     idct: str,
-    reporter: Reporter,
-) -> DecodeResult:
-    command = [
+    decode_threads: int,
+) -> list[str]:
+    return [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
         "warning",
         "-threads",
-        "1",
+        str(decode_threads),
         "-f",
         "m4v",
         "-c:v",
@@ -1592,25 +2238,138 @@ def decode_m4v_to_raw(
         "passthrough",
         "-pix_fmt",
         "yuv420p",
+    ]
+
+
+def decode_m4v_to_raw(
+    ffmpeg: str,
+    adapted: Path,
+    raw_output: Path,
+    *,
+    width: int,
+    height: int,
+    idct: str,
+    decode_threads: int,
+    expected_frames: int,
+    reporter: Reporter,
+    description: str = "Decoding MPEG-4 adapter",
+) -> DecodeResult:
+    command = m4v_decode_prefix(
+        ffmpeg,
+        adapted,
+        idct=idct,
+        decode_threads=decode_threads,
+    ) + [
         "-f",
         "rawvideo",
         "-y",
         str(raw_output),
     ]
-    stderr = run_command(command, reporter, description="ffmpeg MPEG-4 pixel decode")
-    warning_text = stderr.lower()
-    if any(
-        marker in warning_text
-        for marker in ("damaged", "invalid data", "corrupt", "conceal", "error while")
-    ):
-        reporter.warn(
-            "ffmpeg reported possible MPEG-4 bitstream damage while decoding; "
-            "rerun with -vvv to see its full diagnostics"
-        )
+    result = run_ffmpeg(
+        command,
+        reporter,
+        description=description,
+        expected_frames=expected_frames,
+    )
+    warn_on_ffmpeg_damage(result.stderr, reporter)
     frame_count = count_raw_frames(raw_output, width, height)
     if frame_count == 0:
         raise ExternalToolError("ffmpeg produced zero decoded frames")
-    return DecodeResult(raw_path=raw_output, frame_count=frame_count, stderr=stderr)
+    if result.frame_count is not None and result.frame_count != frame_count:
+        reporter.warn(
+            f"ffmpeg progress reported {result.frame_count} frames, but raw output "
+            f"contains {frame_count} complete frames"
+        )
+    return DecodeResult(
+        raw_path=raw_output,
+        frame_count=frame_count,
+        stderr=result.stderr,
+    )
+
+
+def decode_m4v_to_output(
+    ffmpeg: str,
+    adapted: Path,
+    output: Path,
+    *,
+    output_format: str,
+    width: int,
+    height: int,
+    fps: Fraction,
+    idct: str,
+    decode_threads: int,
+    expected_frames: int,
+    reporter: Reporter,
+) -> tuple[int, str]:
+    command = m4v_decode_prefix(
+        ffmpeg,
+        adapted,
+        idct=idct,
+        decode_threads=decode_threads,
+    )
+    if output_format == "ffv1":
+        description = "Decoding and encoding lossless FFV1"
+        command += [
+            "-c:v",
+            "ffv1",
+            "-level",
+            "3",
+            "-g",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "matroska",
+            "-y",
+            str(output),
+        ]
+    elif output_format == "y4m":
+        description = "Decoding and writing uncompressed Y4M"
+        command += [
+            "-c:v",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "yuv4mpegpipe",
+            "-y",
+            str(output),
+        ]
+    elif output_format == "raw":
+        description = "Decoding and writing raw yuv420p"
+        command += [
+            "-f",
+            "rawvideo",
+            "-y",
+            str(output),
+        ]
+    else:
+        raise AssertionError(f"unhandled output format {output_format}")
+
+    result = run_ffmpeg(
+        command,
+        reporter,
+        description=description,
+        expected_frames=expected_frames,
+    )
+    warn_on_ffmpeg_damage(result.stderr, reporter)
+    if not output.is_file() or output.stat().st_size == 0:
+        raise ExternalToolError(f"ffmpeg did not create a non-empty output: {output}")
+
+    if output_format == "raw":
+        frame_count = count_raw_frames(output, width, height)
+    elif result.frame_count is not None:
+        frame_count = result.frame_count
+    else:
+        # ``-progress`` normally always emits frame=.  Retain a usable result
+        # for unusual ffmpeg builds, but make the unverifiable fallback clear.
+        reporter.warn(
+            "ffmpeg did not report a final frame count; using the VID1 packet count"
+        )
+        frame_count = expected_frames
+    if frame_count == 0:
+        raise ExternalToolError("ffmpeg produced zero decoded frames")
+    return frame_count, result.stderr
 
 
 def merge_component_passes(
@@ -1622,6 +2381,7 @@ def merge_component_passes(
     height: int,
     luma_frames: int,
     chroma_frames: int,
+    reporter: Optional[Reporter] = None,
 ) -> int:
     if luma_frames != chroma_frames:
         raise ExternalToolError(
@@ -1631,7 +2391,21 @@ def merge_component_passes(
 
     y_size = width * height
     chroma_size = ((width + 1) // 2) * ((height + 1) // 2)
-    with luma_raw.open("rb") as luma, chroma_raw.open("rb") as chroma, output.open("wb") as merged:
+    progress_context = (
+        reporter.progress(
+            total=luma_frames,
+            description="Combining luma/chroma decoder passes",
+            unit="frame",
+        )
+        if reporter is not None
+        else _NullProgress()
+    )
+    with (
+        luma_raw.open("rb") as luma,
+        chroma_raw.open("rb") as chroma,
+        output.open("wb") as merged,
+        progress_context as progress,
+    ):
         for frame in range(luma_frames):
             y = luma.read(y_size)
             if len(y) != y_size:
@@ -1644,6 +2418,7 @@ def merge_component_passes(
                 raise ExternalToolError(f"short chroma frame {frame}")
             merged.write(y)
             merged.write(uv)
+            progress.update(1)
     return luma_frames
 
 
@@ -1655,13 +2430,27 @@ def write_y4m(
     height: int,
     fps: Fraction,
     frame_count: int,
+    reporter: Optional[Reporter] = None,
 ) -> None:
     frame_size = yuv420_frame_size(width, height)
     header = (
         f"YUV4MPEG2 W{width} H{height} F{fps.numerator}:{fps.denominator} "
         "Ip A1:1 C420mpeg2 XYSCSS=420MPEG2\n"
     ).encode("ascii")
-    with raw_input.open("rb") as source, output.open("wb") as destination:
+    progress_context = (
+        reporter.progress(
+            total=frame_count,
+            description="Writing Y4M",
+            unit="frame",
+        )
+        if reporter is not None
+        else _NullProgress()
+    )
+    with (
+        raw_input.open("rb") as source,
+        output.open("wb") as destination,
+        progress_context as progress,
+    ):
         destination.write(header)
         for frame in range(frame_count):
             data = source.read(frame_size)
@@ -1669,6 +2458,7 @@ def write_y4m(
                 raise ExternalToolError(f"short raw frame {frame} while writing Y4M")
             destination.write(b"FRAME\n")
             destination.write(data)
+            progress.update(1)
         if source.read(1):
             raise ExternalToolError("raw input contains data after the expected final frame")
 
@@ -1682,8 +2472,9 @@ def encode_ffv1(
     height: int,
     fps: Fraction,
     overwrite: bool,
+    expected_frames: int,
     reporter: Reporter,
-) -> None:
+) -> int:
     command = [
         ffmpeg,
         "-hide_banner",
@@ -1710,14 +2501,53 @@ def encode_ffv1(
         "1",
         "-pix_fmt",
         "yuv420p",
+        "-f",
+        "matroska",
         "-y" if overwrite else "-n",
         str(output),
     ]
-    run_command(command, reporter, description="ffmpeg FFV1 encode")
+    result = run_ffmpeg(
+        command,
+        reporter,
+        description="Encoding lossless FFV1",
+        expected_frames=expected_frames,
+    )
+    if result.frame_count is None:
+        reporter.warn(
+            "ffmpeg did not report a final FFV1 frame count; using the raw frame count"
+        )
+        return expected_frames
+    return result.frame_count
 
 
-def copy_raw_output(raw_input: Path, output: Path) -> None:
-    shutil.copyfile(raw_input, output)
+def copy_raw_output(
+    raw_input: Path,
+    output: Path,
+    *,
+    reporter: Optional[Reporter] = None,
+) -> None:
+    total = raw_input.stat().st_size
+    progress_context = (
+        reporter.progress(
+            total=total,
+            description="Copying raw yuv420p",
+            unit="B",
+            unit_scale=True,
+        )
+        if reporter is not None
+        else _NullProgress()
+    )
+    with (
+        raw_input.open("rb") as source,
+        output.open("wb") as destination,
+        progress_context as progress,
+    ):
+        while True:
+            block = source.read(8 * 1024 * 1024)
+            if not block:
+                break
+            destination.write(block)
+            progress.update(len(block))
 
 
 # ---------------------------------------------------------------------------
@@ -1730,6 +2560,9 @@ def picture_summary(pictures: Sequence[Picture]) -> dict[str, object]:
     custom_luma = 0
     custom_chroma = 0
     gmc_formats: dict[str, int] = {}
+    gmc_mappings: dict[str, int] = {}
+    fixed16_zero_tail = 0
+    fixed16_nonzero_tail = 0
     for picture in pictures:
         counts[picture.frame_name] = counts.get(picture.frame_name, 0) + 1
         extended_quant += int(picture.uses_extended_quant)
@@ -1739,6 +2572,15 @@ def picture_summary(pictures: Sequence[Picture]) -> dict[str, object]:
             gmc_formats[picture.gmc_source_format] = (
                 gmc_formats.get(picture.gmc_source_format, 0) + 1
             )
+        if picture.gmc_mapping is not None:
+            gmc_mappings[picture.gmc_mapping] = (
+                gmc_mappings.get(picture.gmc_mapping, 0) + 1
+            )
+        if picture.gmc_source_format == "fixed16" and len(picture.gmc_raw_values) > 2:
+            if all(value == 0 for value in picture.gmc_raw_values[2:]):
+                fixed16_zero_tail += 1
+            else:
+                fixed16_nonzero_tail += 1
     return {
         "frames": len(pictures),
         "frame_types": counts,
@@ -1746,6 +2588,9 @@ def picture_summary(pictures: Sequence[Picture]) -> dict[str, object]:
         "luma_matrix_updates": custom_luma,
         "chroma_matrix_updates": custom_chroma,
         "gmc_formats": gmc_formats,
+        "gmc_mappings": gmc_mappings,
+        "fixed16_zero_tail_frames": fixed16_zero_tail,
+        "fixed16_nonzero_tail_frames": fixed16_nonzero_tail,
         "first_timecode": pictures[0].timecode if pictures else None,
         "last_timecode": pictures[-1].timecode if pictures else None,
     }
@@ -1758,6 +2603,8 @@ def inspect_report(
     header_skip: int,
     fps: Fraction,
     timing_mode: str,
+    fixed16_gmc_divisor: int,
+    fixed16_gmc_mode: str,
     pictures: Sequence[Picture],
     probes: Sequence[SkipProbe],
 ) -> dict[str, object]:
@@ -1777,6 +2624,8 @@ def inspect_report(
         "selected_fps": f"{fps.numerator}/{fps.denominator}",
         "timing_mode": timing_mode,
         "vidd_header_skip": header_skip,
+        "fixed16_gmc_divisor": fixed16_gmc_divisor,
+        "fixed16_gmc_mode": fixed16_gmc_mode,
         "skip_probes": [
             {
                 "skip": probe.skip,
@@ -1814,12 +2663,42 @@ def ensure_output_available(path: Path, overwrite: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def choose_fixed16_gmc_divisor(requested: str) -> int:
+    if requested == "auto":
+        # Used only by the legacy translation/points mappings.  The verified
+        # packed-zigzag mapping is exact and does not use a divisor.
+        return 16
+    try:
+        divisor = int(requested, 0)
+    except ValueError as exc:
+        raise VID1Error(
+            "--fixed16-gmc-divisor must be 'auto' or a positive integer"
+        ) from exc
+    if divisor <= 0:
+        raise VID1Error("--fixed16-gmc-divisor must be positive")
+    return divisor
+
+
 def convert(args: argparse.Namespace) -> None:
-    reporter = Reporter(args.verbose)
+    ffmpeg_log_path = Path(args.ffmpeg_log) if args.ffmpeg_log else None
+    if ffmpeg_log_path is not None:
+        ffmpeg_log_path.parent.mkdir(parents=True, exist_ok=True)
+        ffmpeg_log_path.write_text("", encoding="utf-8")
+
+    reporter = Reporter(
+        args.verbose,
+        quiet=args.quiet,
+        progress_mode=args.progress,
+        ffmpeg_log=ffmpeg_log_path,
+    )
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output is not None else None
     if not input_path.is_file():
         raise VID1Error(f"input file not found: {input_path}")
+
+    input_size = input_path.stat().st_size
+    reporter.status(f"Input: {input_path} ({format_size(input_size)})")
+    fixed16_divisor = choose_fixed16_gmc_divisor(args.fixed16_gmc_divisor)
 
     with input_path.open("rb") as stream:
         info = parse_vid1_file_header(stream)
@@ -1828,7 +2707,10 @@ def convert(args: argparse.Namespace) -> None:
             info,
             resync_scan=args.resync_scan,
             max_chunk_size=args.max_chunk_size,
+            reporter=reporter,
+            input_size=input_size,
         )
+    reporter.status(f"Found {len(chunks)} VIDD video packet(s)")
 
     width = args.width if args.width is not None else info.width
     height = args.height if args.height is not None else info.height
@@ -1844,15 +2726,20 @@ def convert(args: argparse.Namespace) -> None:
         matrix_order=args.matrix_order,
         probe_frames=args.probe_frames,
         gmc_format=args.gmc_format,
+        fixed16_divisor=fixed16_divisor,
+        fixed16_mapping=args.fixed16_gmc_mode,
         reporter=reporter,
     )
-    reporter.info(f"parsing {len(chunks)} video packets with VIDD header skip {header_skip}")
+    reporter.status(f"VIDD picture-header offset: {header_skip} byte(s)")
     pictures = parse_picture_sequence(
         chunks,
         header_skip=header_skip,
         matrix_order=args.matrix_order,
         lenient=args.lenient,
         gmc_format=args.gmc_format,
+        fixed16_divisor=fixed16_divisor,
+        fixed16_mapping=args.fixed16_gmc_mode,
+        reporter=reporter,
     )
     pictures, timing_mode = assign_display_indices(pictures, args.timing, reporter)
 
@@ -1862,11 +2749,38 @@ def convert(args: argparse.Namespace) -> None:
         )
 
     summary = picture_summary(pictures)
-    reporter.info(
-        f"VID1 {width}x{height}, {fps.numerator}/{fps.denominator} fps, "
-        f"frames={summary['frames']} types={summary['frame_types']} "
+    reporter.status(
+        f"Video: {width}x{height}, {fps.numerator}/{fps.denominator} fps, "
+        f"{summary['frames']} frames, types={summary['frame_types']}, "
         f"timing={timing_mode}"
     )
+    fixed16_count = int(summary["gmc_formats"].get("fixed16", 0))
+    if fixed16_count:
+        mappings = summary["gmc_mappings"]
+        zigzag_count = int(mappings.get("zigzag", 0))
+        legacy_count = fixed16_count - zigzag_count
+        if zigzag_count:
+            reporter.status(
+                f"Packed GMC: {zigzag_count} S frame(s), "
+                "x=folded(raw>>2), y=folded(raw>>3), "
+                f"mapping={mappings}"
+            )
+        if legacy_count:
+            mode_note = (
+                "legacy automatic scale"
+                if args.fixed16_gmc_divisor == "auto"
+                else "user scale override"
+            )
+            reporter.status(
+                f"Legacy fixed16 GMC: {legacy_count} S frame(s), "
+                f"divisor={fixed16_divisor} ({mode_note}), mapping={mappings}"
+            )
+        if int(summary["fixed16_zero_tail_frames"]):
+            reporter.info(
+                f"fixed16 zero-tail layout: {summary['fixed16_zero_tail_frames']} "
+                "frame(s)",
+                level=1,
+            )
 
     if args.inspect:
         report = inspect_report(
@@ -1875,6 +2789,8 @@ def convert(args: argparse.Namespace) -> None:
             header_skip=header_skip,
             fps=fps,
             timing_mode=timing_mode,
+            fixed16_gmc_divisor=fixed16_divisor,
+            fixed16_gmc_mode=args.fixed16_gmc_mode,
             pictures=pictures,
             probes=probes,
         )
@@ -1888,6 +2804,9 @@ def convert(args: argparse.Namespace) -> None:
     ensure_output_available(output_path, args.overwrite)
     output_format = determine_output_format(args.format, output_path)
     ffmpeg = executable_or_error(args.ffmpeg)
+    reporter.status(
+        f"Output: {output_path} ({output_format}; decode threads={args.decode_threads or 'auto'})"
+    )
 
     has_b_frames = any(picture.frame_type == 2 for picture in pictures)
     dual_pass = pictures_need_dual_matrix_pass(pictures)
@@ -1908,6 +2827,7 @@ def convert(args: argparse.Namespace) -> None:
             dir=str(temporary_parent) if temporary_parent else None,
         ) as temporary_name:
             temporary = Path(temporary_name)
+            reporter.info(f"temporary directory: {temporary}", level=1)
             if args.keep_temp:
                 keep_directory = Path(str(temporary) + "-kept")
 
@@ -1920,26 +2840,58 @@ def convert(args: argparse.Namespace) -> None:
                 trim_payload_padding=not args.keep_payload_padding,
             )
             luma_m4v = temporary / "adapted-luma.m4v"
-            luma_yuv = temporary / "decoded-luma.yuv"
-            write_adapted_stream(luma_m4v, pictures, base_config)
-            luma_result = decode_m4v_to_raw(
-                ffmpeg,
+            write_adapted_stream(
                 luma_m4v,
-                luma_yuv,
-                width=width,
-                height=height,
-                idct=args.idct,
+                pictures,
+                base_config,
                 reporter=reporter,
+                progress_description="Writing luma MPEG-4 adapter",
+            )
+            reporter.info(
+                f"adapter size: {format_size(luma_m4v.stat().st_size)}",
+                level=1,
             )
 
-            decoded_raw = luma_result.raw_path
-            decoded_frames = luma_result.frame_count
-            if dual_pass:
+            if not dual_pass:
+                decoded_frames, _decoder_stderr = decode_m4v_to_output(
+                    ffmpeg,
+                    luma_m4v,
+                    output_path,
+                    output_format=output_format,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    idct=args.idct,
+                    decode_threads=args.decode_threads,
+                    expected_frames=len(pictures),
+                    reporter=reporter,
+                )
+            else:
+                luma_yuv = temporary / "decoded-luma.yuv"
+                luma_result = decode_m4v_to_raw(
+                    ffmpeg,
+                    luma_m4v,
+                    luma_yuv,
+                    width=width,
+                    height=height,
+                    idct=args.idct,
+                    decode_threads=args.decode_threads,
+                    expected_frames=len(pictures),
+                    reporter=reporter,
+                    description="Decoding luma-matrix pass",
+                )
+
                 chroma_config = replace(base_config, matrix_plane="chroma")
                 chroma_m4v = temporary / "adapted-chroma.m4v"
                 chroma_yuv = temporary / "decoded-chroma.yuv"
                 merged_yuv = temporary / "decoded-merged.yuv"
-                write_adapted_stream(chroma_m4v, pictures, chroma_config)
+                write_adapted_stream(
+                    chroma_m4v,
+                    pictures,
+                    chroma_config,
+                    reporter=reporter,
+                    progress_description="Writing chroma MPEG-4 adapter",
+                )
                 chroma_result = decode_m4v_to_raw(
                     ffmpeg,
                     chroma_m4v,
@@ -1947,7 +2899,10 @@ def convert(args: argparse.Namespace) -> None:
                     width=width,
                     height=height,
                     idct=args.idct,
+                    decode_threads=args.decode_threads,
+                    expected_frames=len(pictures),
                     reporter=reporter,
+                    description="Decoding chroma-matrix pass",
                 )
                 decoded_frames = merge_component_passes(
                     luma_result.raw_path,
@@ -1957,8 +2912,42 @@ def convert(args: argparse.Namespace) -> None:
                     height=height,
                     luma_frames=luma_result.frame_count,
                     chroma_frames=chroma_result.frame_count,
+                    reporter=reporter,
                 )
-                decoded_raw = merged_yuv
+
+                if output_format == "y4m":
+                    reporter.status("Packaging merged pixels as Y4M")
+                    write_y4m(
+                        merged_yuv,
+                        output_path,
+                        width=width,
+                        height=height,
+                        fps=fps,
+                        frame_count=decoded_frames,
+                        reporter=reporter,
+                    )
+                elif output_format == "raw":
+                    reporter.status("Copying merged raw pixels")
+                    copy_raw_output(merged_yuv, output_path, reporter=reporter)
+                elif output_format == "ffv1":
+                    encoded_frames = encode_ffv1(
+                        ffmpeg,
+                        merged_yuv,
+                        output_path,
+                        width=width,
+                        height=height,
+                        fps=fps,
+                        overwrite=True,
+                        expected_frames=decoded_frames,
+                        reporter=reporter,
+                    )
+                    if encoded_frames != decoded_frames:
+                        reporter.warn(
+                            f"FFV1 encoder reported {encoded_frames} frames for "
+                            f"{decoded_frames} merged frames"
+                        )
+                else:
+                    raise AssertionError(f"unhandled output format {output_format}")
 
             if decoded_frames != len(pictures):
                 message = (
@@ -1969,49 +2958,26 @@ def convert(args: argparse.Namespace) -> None:
                     raise ExternalToolError(message)
                 reporter.warn(message)
 
-            if output_format == "y4m":
-                write_y4m(
-                    decoded_raw,
-                    output_path,
-                    width=width,
-                    height=height,
-                    fps=fps,
-                    frame_count=decoded_frames,
-                )
-            elif output_format == "raw":
-                copy_raw_output(decoded_raw, output_path)
-            elif output_format == "ffv1":
-                encode_ffv1(
-                    ffmpeg,
-                    decoded_raw,
-                    output_path,
-                    width=width,
-                    height=height,
-                    fps=fps,
-                    overwrite=True,
-                    reporter=reporter,
-                )
-            else:
-                raise AssertionError(f"unhandled output format {output_format}")
-
             if args.dump_adapted:
                 destination = Path(args.dump_adapted)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(luma_m4v, destination)
-                reporter.info(f"copied diagnostic adapted stream to {destination}")
+                reporter.status(f"Copied diagnostic adapter to {destination}")
 
             if keep_directory is not None:
+                reporter.status(f"Copying temporary files to {keep_directory}")
                 shutil.copytree(temporary, keep_directory)
-                reporter.info(f"kept temporary files in {keep_directory}")
+                reporter.status(f"Kept temporary files in {keep_directory}")
 
     except Exception:
         if output_path.exists():
             output_path.unlink(missing_ok=True)
         raise
 
-    reporter.info(
-        f"wrote {decoded_frames} decoded frames to {output_path} "
-        f"({output_format}, yuv420p)"
+    output_size = output_path.stat().st_size
+    reporter.status(
+        f"Done: {decoded_frames} frames -> {output_path} "
+        f"({format_size(output_size)}) in {format_duration(time.monotonic() - reporter.started)}"
     )
 
 
@@ -2068,10 +3034,19 @@ def run_self_tests() -> None:
     writer.close()
     assert trimmed.getvalue() == b"\x80"
 
-    # Signed fixed16 GMC conversion and MPEG-4 VLC round trip.
-    assert rounded_divide(192, 16) == 12
-    assert rounded_divide(-192, 16) == -12
-    trajectory = encode_sprite_trajectory((12, 16, 0, 0), 2)
+    # Retail packed GMC words use folded signed codes with axis-specific shifts.
+    assert choose_fixed16_gmc_divisor("auto") == 16
+    assert folded_signed_decode(0) == 0
+    assert folded_signed_decode(1) == -1
+    assert folded_signed_decode(2) == 1
+    sprite = SpriteConfig(2, 3)
+    assert decode_fixed16_zigzag_values(
+        (192, 256, 0, 0), sprite, frame_index=4
+    ) == (24, 16, 0, 0)
+    assert decode_fixed16_zigzag_values(
+        (52, 424, 0, 0), sprite, frame_index=808
+    ) == (-7, -27, 0, 0)
+    trajectory = encode_sprite_trajectory((24, 16, 0, 0), 2)
     packed = bytearray((len(trajectory) + 7) // 8)
     for bit_index, bit in enumerate(trajectory):
         packed[bit_index >> 3] |= bit << (7 - (bit_index & 7))
@@ -2122,6 +3097,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--fixed16-gmc-divisor",
+        default="auto",
+        help=(
+            "divisor used only by legacy translation/points mappings; "
+            "auto uses 16. The packed-zigzag mapping is exact and ignores it"
+        ),
+    )
+    parser.add_argument(
+        "--fixed16-gmc-mode",
+        choices=("auto", "zigzag", "translation", "points"),
+        default="auto",
+        help=(
+            "how proprietary 16-bit GMC words map to MPEG-4: auto detects "
+            "the retail packed-zigzag layout; zigzag forces x=folded(raw>>2) "
+            "and y=folded(raw>>3); translation/points retain legacy divisor mappings"
+        ),
+    )
+    parser.add_argument(
         "--matrix-order",
         choices=("auto", "row", "zigzag"),
         default="auto",
@@ -2137,6 +3130,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--ffmpeg",
         default="ffmpeg",
         help="ffmpeg executable name or path",
+    )
+    parser.add_argument(
+        "--decode-threads",
+        type=int,
+        default=0,
+        help="FFmpeg MPEG-4 decoder thread count; 0 lets FFmpeg choose automatically",
     )
     parser.add_argument(
         "--idct",
@@ -2194,7 +3193,23 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="parse and print JSON metadata/frame statistics without invoking ffmpeg",
     )
     parser.add_argument("--overwrite", action="store_true", help="replace an existing output")
-    parser.add_argument("-v", "--verbose", action="count", default=0, help="increase diagnostics")
+    parser.add_argument(
+        "--progress",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="progress display policy; auto shows bars when standard error is a terminal",
+    )
+    parser.add_argument(
+        "--ffmpeg-log",
+        help="write complete ffmpeg command lines and diagnostics to this text file",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="suppress status messages and progress bars (warnings/errors still print)",
+    )
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="increase diagnostics; -vv shows commands and -vvv prints ffmpeg warnings")
     parser.add_argument("--self-test", action="store_true", help="run internal tests and exit")
     parser.add_argument("--version", action="version", version=f"{PROGRAM} {VERSION}")
     return parser
@@ -2215,6 +3230,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.error("--probe-frames must be positive")
     if args.max_chunk_size <= 0:
         parser.error("--max-chunk-size must be positive")
+    if args.decode_threads < 0:
+        parser.error("--decode-threads cannot be negative")
+    if args.quiet and args.verbose:
+        parser.error("--quiet cannot be combined with --verbose")
+    try:
+        choose_fixed16_gmc_divisor(args.fixed16_gmc_divisor)
+    except VID1Error as exc:
+        parser.error(str(exc))
 
     try:
         convert(args)
