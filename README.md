@@ -40,13 +40,13 @@ make install
 There might be other dependencies that you need to install as well. You can Google your compile error messages as needed.
 
 ## Decode VID1 Video Stream to FFV1 MKV
-We will first use the [`vid1_decode.py`](vid1_decode.py) script to decode the VID1 video stream into an FFV1 MKV file:
+We will first use the [`vid1_decode.py`](vid1_decode.py) script to decode the VID1 video stream and re-encode it into an FFV1 (lossless-compressed) MKV file:
 
 ```bash
 python3 vid1_decode.py original.vid video.mkv
 ```
 
-This re-encodes the video stream to FFV1 and saves it in an MKV container. To recursively run it on all `.vid` files nested within the current directory (automatically reattempting failed runs with `--resync-scan`):
+To recursively run it on all `.vid` files nested within the current directory (automatically reattempting failed runs with `--resync-scan`):
 
 ```bash
 find . -type f -name '*.vid' -exec sh -c '"$HOME/VID1-Video-Translator/vid1_decode.py" "$1" "$1.video.mkv" || "$HOME/VID1-Video-Translator/vid1_decode.py" --resync-scan "$1" "$1.video.mkv"' sh {} \;
@@ -60,6 +60,12 @@ ffmpeg -i original.vid -c:a flac audio.flac
 ```
 
 This isn't strictly necessary (we can directly copy the original audio stream), but not all `.vid` files have audio streams: some (such as those in *The Lord of the Rings: The Return of the King*) only have a video stream, and the corresponding audio is elsewhere on the disc. By converting all audio to FLAC, we maintain consistency (every final file will have FFV1 video and FLAC audio), and we enable ourselves to fill in missing audio files manually on a disc-by-disc basis if needed.
+
+To recursively run it on all `.vid` files nested within the current directory:
+
+```bash
+find . -type f -name '*.vid' -exec "$HOME/VID1-Video-Translator/librempeg/ffmpeg" "$1" -vn -c:a flac "$1.audio.flac" \;
+```
 
 ## Remux Translated Video Stream and FLAC Audio Stream
 Next, we will use the source-compiled `ffmpeg` to remux the translated video stream with the original audio stream.
