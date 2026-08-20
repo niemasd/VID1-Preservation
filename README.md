@@ -56,7 +56,7 @@ find . -type f -name '*.vid' -exec sh -c '"$HOME/VID1-Video-Translator/vid1_deco
 We will next use librempeg's `ffmpeg` to convert the VID1 file's audio stream to a lossless-compressed FLAC file:
 
 ```bash
-ffmpeg -i original.vid -c:a flac audio.flac
+ffmpeg -i original.vid -c:a flac -compression_level 12 audio.flac
 ```
 
 This isn't strictly necessary (we can directly copy the original audio stream), but not all `.vid` files have audio streams: some (such as those in *The Lord of the Rings: The Return of the King*) only have a video stream, and the corresponding audio is elsewhere on the disc. By converting all audio to FLAC, we maintain consistency (every final file will have FFV1 video and FLAC audio), and we enable ourselves to fill in missing audio files manually on a disc-by-disc basis if needed.
@@ -64,7 +64,7 @@ This isn't strictly necessary (we can directly copy the original audio stream), 
 To recursively run it on all `.vid` files nested within the current directory:
 
 ```bash
-find . -type f -name '*.vid' -exec "$HOME/VID1-Video-Translator/librempeg/ffmpeg" "$1" -vn -c:a flac "$1.audio.flac" \;
+find . -type f -name '*.vid' -exec "$HOME/VID1-Video-Translator/librempeg/ffmpeg" "$1" -vn -c:a flac -compression_level 12 "$1.audio.flac" \;
 ```
 
 ## Remux Translated Video Stream and FLAC Audio Stream
