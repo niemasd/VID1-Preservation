@@ -98,7 +98,7 @@ ffmpeg -i audio.flac -map 0:a:0 -t "$(ffprobe -v error -show_entries format=dura
 ```
 
 ### YouTube Longplay Matches
-For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches for identification:
+For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches to know what audio should be playing with it:
 
 * ***The Lord of the Rings: The Return of the King* (GKLE69):** https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
     * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
@@ -109,8 +109,8 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
     * **`helmfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=382
     * **`isenfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=715
     * **`isenfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=1306
-    * **`mtwlfmv1.vid`:** TODO
-    * **`mtydfmv2.vid`:** TODO
+    * **`mtwlfmv1.vid`:** https://youtu.be/BKy6IZ8HuCE?t=21
+    * **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
     * **`osgifmv1.vid`:** TODO
     * **`osgifmv2.vid`:** TODO
     * **`pat1fmv1.vid`:** TODO
