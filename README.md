@@ -84,7 +84,7 @@ python3 extract_sc.py archive.scg
 To recursively run this on all `.scg` files nested within the current directory (where `OUT_DIR` is the desired output directory):
 
 ```bash
-find . -type f -name '*.scg' -exec python3 extract_audio.py -o OUT_DIR/{} {} \;
+find . -type f -name '*.scg' -exec python3 extract_sc.py -o OUT_DIR/{} {} \;
 ```
 
 Some audio will be extracted with the same name as the corresponding `.vid` file (just with the `.flac` extension), but some are ambiguously named and are longer than their corresponding `.vid` file and need to be trimmed (e.g. using `ffmpeg`). For example, a cutscene that begins with an FMV in a `.vid` file but that transitions to in-engine rendering will have audio that spans the whole cutscene (not just the `.vid` portion), meaning the corresponding `.flac` file will be *longer* than the corresponding `.vid` file. Unfortunately, many of the audio streams in a `.scg` file are not identified in any meaningful way (at least not by the extraction script), and many of the audio streams are irrelevant (e.g. in-game sound effects).
