@@ -81,7 +81,7 @@ ByteBuffer = Union[bytes, memoryview]
 
 
 PROGRAM = "vid1_decode.py"
-VERSION = "5.2"
+VERSION = "5.3"
 
 
 def tag(text: str) -> int:
@@ -1830,6 +1830,47 @@ def parse_fraction(text: str) -> Fraction:
     return value
 
 
+MPEG4_MAX_TIME_RESOLUTION = (1 << 16) - 1
+
+
+def fit_mpeg4_frame_rate(rate: Fraction) -> Fraction:
+    """Return a close rational rate that fits MPEG-4 Part 2 VOL timing.
+
+    ``time_increment_resolution`` stores the rate numerator in 16 bits.  VID1
+    files commonly express NTSC-like rates as microsecond clocks, for example
+    1000000/33367 fps.  The value is perfectly usable, but its reduced
+    numerator is too large for a VOL.  Approximate the reciprocal frame period
+    with a denominator no larger than the VOL limit, then invert it; this
+    directly guarantees a fitted rate numerator of at most 65535.
+    """
+    if rate <= 0:
+        raise VID1Error("frame rate must be positive")
+    if rate > MPEG4_MAX_TIME_RESOLUTION:
+        raise VID1Error(
+            f"frame rate {rate.numerator}/{rate.denominator} exceeds MPEG-4's "
+            f"maximum representable fixed rate of {MPEG4_MAX_TIME_RESOLUTION} fps"
+        )
+
+    fitted = rate
+    if rate.numerator > MPEG4_MAX_TIME_RESOLUTION:
+        frame_period = Fraction(rate.denominator, rate.numerator)
+        fitted_period = frame_period.limit_denominator(MPEG4_MAX_TIME_RESOLUTION)
+        if fitted_period.numerator == 0:
+            raise VID1Error(
+                f"could not approximate frame rate {rate.numerator}/{rate.denominator} "
+                "within MPEG-4's timing limits"
+            )
+        fitted = Fraction(fitted_period.denominator, fitted_period.numerator)
+
+    increment_bits = max(1, (fitted.numerator - 1).bit_length())
+    if fitted.denominator >= (1 << increment_bits):
+        raise VID1Error(
+            f"frame-rate denominator {fitted.denominator} does not fit MPEG-4's "
+            f"{increment_bits}-bit fixed increment field; use a rate of at least 1 fps"
+        )
+    return fitted
+
+
 def choose_fps(requested: str, info: VID1Info, reporter: Reporter) -> Fraction:
     if requested != "auto":
         rate = parse_fraction(requested)
@@ -1844,12 +1885,15 @@ def choose_fps(requested: str, info: VID1Info, reporter: Reporter) -> Fraction:
         reporter.info("using 24 fps fallback because VIDH has no plausible frame rate")
 
     rate = rate.limit_denominator(100000)
-    if rate.numerator > 65535:
-        raise VID1Error(
-            f"frame-rate numerator {rate.numerator} exceeds MPEG-4's 16-bit "
-            "time_increment_resolution; pass an equivalent lower-resolution rate"
+    fitted = fit_mpeg4_frame_rate(rate)
+    if fitted != rate:
+        drift_ppm = float((fitted / rate - 1) * 1_000_000)
+        reporter.warn(
+            f"frame rate {rate.numerator}/{rate.denominator} exceeds MPEG-4's "
+            f"16-bit timing resolution; using {fitted.numerator}/{fitted.denominator} "
+            f"fps instead ({drift_ppm:+.6g} ppm)"
         )
-    return rate
+    return fitted
 
 
 def unwrap_timecodes(values: Sequence[int]) -> list[int]:
@@ -3274,6 +3318,16 @@ def run_self_tests() -> None:
     ]
     assert assign_timecode_indices(mock) == [0, 3, 1, 2, 5, 4]
     assert assign_gop_indices(mock) == [0, 3, 1, 2, 5, 4]
+
+    # Microsecond-clock frame rates can exceed MPEG-4's 16-bit VOL timing
+    # numerator even though the actual rate is ordinary.  Fit them with
+    # negligible drift instead of requiring a manual --fps override.
+    source_rate = Fraction(1000000, 33367)
+    fitted_rate = fit_mpeg4_frame_rate(source_rate)
+    assert fitted_rate.numerator <= MPEG4_MAX_TIME_RESOLUTION
+    assert fitted_rate.denominator < (1 << time_increment_bits(fitted_rate.numerator))
+    assert abs(fitted_rate / source_rate - 1) < Fraction(1, 100_000_000)
+    assert fit_mpeg4_frame_rate(Fraction(30000, 1001)) == Fraction(30000, 1001)
 
     # The FFmpeg raw frame-size formula supports odd dimensions too.
     assert yuv420_frame_size(4, 4) == 24
