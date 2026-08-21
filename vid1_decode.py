@@ -23,6 +23,12 @@ mode recognises that exact low-bit layout and writes the corresponding MPEG-4
 sprite trajectory.  The v4 folded/zig-zag interpretation and divisor-based
 mappings remain available as explicit diagnostic compatibility options.
 
+When auto mode cannot know the output sprite shape until the first S picture,
+the resolved shape is backfilled to earlier pictures in the same VID1 sprite
+state.  This keeps the MPEG-4 VOL stable from the first reference picture;
+some decoder versions otherwise discard prediction references when a second
+VOL appears mid-GOP and display white or block-concealed frames.
+
 Extended VID1 luma/chroma quantisation matrices do not map one-for-one onto
 MPEG-4 Part 2's intra/non-intra matrices.  For such pictures this program can
 run two decoder passes, using the luma matrix for both MPEG-4 matrices in one
@@ -75,7 +81,7 @@ ByteBuffer = Union[bytes, memoryview]
 
 
 PROGRAM = "vid1_decode.py"
-VERSION = "5.1"
+VERSION = "5.2"
 
 
 def tag(text: str) -> int:
@@ -1416,18 +1422,30 @@ def parse_picture(
                 accuracy=bits.read(2),
             )
             state.source_sprite = source_sprite
-            # For explicit modes the output VOL shape can be known before the
-            # first S picture.  In auto mode, defer until the first trajectory
-            # reveals whether the proprietary fixed16 zero-tail layout is in
-            # use.
+            # For explicit modes, or after auto mode has identified the
+            # stream representation, the output VOL shape is known immediately.
+            # Before the first auto-detected S picture it remains unresolved and
+            # is backfilled by resolve_sprite_vol_state() after the sequence has
+            # been parsed.  Always clear the old value on a new source update so
+            # a changed configuration cannot temporarily inherit stale VOL state.
+            resolved_sprite: Optional[SpriteConfig] = None
             if gmc_format == "mpeg4" or state.gmc_format == "mpeg4":
-                state.output_sprite = source_sprite
-            elif gmc_format == "fixed16":
-                if fixed16_mapping in ("points", "vid1", "zigzag"):
-                    state.output_sprite = source_sprite
-                elif fixed16_mapping == "translation" and source_sprite.warping_points:
-                    state.output_sprite = SpriteConfig(1, source_sprite.accuracy)
-            output_sprite = state.output_sprite
+                resolved_sprite = source_sprite
+            elif gmc_format == "fixed16" or state.gmc_format == "fixed16":
+                selected_mapping = (
+                    fixed16_mapping
+                    if fixed16_mapping != "auto"
+                    else state.fixed16_mapping
+                )
+                if selected_mapping in ("points", "vid1", "zigzag"):
+                    resolved_sprite = source_sprite
+                elif (
+                    selected_mapping == "translation"
+                    and source_sprite.warping_points
+                ):
+                    resolved_sprite = SpriteConfig(1, source_sprite.accuracy)
+            state.output_sprite = resolved_sprite
+            output_sprite = resolved_sprite
 
         uses_extended_quant = bool(bits.read_bit())
         if uses_extended_quant:
@@ -1572,6 +1590,78 @@ def parse_picture(
     )
 
 
+def resolve_sprite_vol_state(
+    pictures: Sequence[Picture],
+    *,
+    reporter: Optional[Reporter] = None,
+) -> list[Picture]:
+    """Backfill an auto-resolved MPEG-4 sprite shape within each source-state run.
+
+    VID1 declares its source sprite configuration before ordinary I/P pictures,
+    but auto mode may need the first S trajectory to distinguish the proprietary
+    fixed16 mappings.  Emitting those earlier pictures with ``sprite=None`` would
+    write a no-sprite VOL followed by a GMC VOL at the first S picture.  Several
+    MPEG-4 decoder versions treat that mid-GOP VOL replacement as a sequence
+    reset and lose the reference picture, producing white/block-concealed output.
+
+    Once all headers in a run have been parsed, the output shape is known.  Apply
+    it to the preceding pictures so the adapter announces one stable VOL before
+    the first reference picture.  A run with no S picture remains unresolved and
+    needs no sprite-enabled VOL.
+    """
+    resolved_pictures = list(pictures)
+    backfilled = 0
+    start = 0
+
+    while start < len(resolved_pictures):
+        source_config = resolved_pictures[start].source_sprite_config
+        end = start + 1
+        while (
+            end < len(resolved_pictures)
+            and resolved_pictures[end].source_sprite_config == source_config
+        ):
+            end += 1
+
+        output_configs = {
+            picture.sprite_config
+            for picture in resolved_pictures[start:end]
+            if picture.sprite_config is not None
+        }
+        if len(output_configs) > 1:
+            details = ", ".join(
+                f"{config.warping_points} point(s), accuracy {config.accuracy}"
+                for config in sorted(
+                    output_configs,
+                    key=lambda config: (config.warping_points, config.accuracy),
+                )
+            )
+            first_frame = resolved_pictures[start].index
+            last_frame = resolved_pictures[end - 1].index
+            raise VID1Error(
+                f"frames {first_frame}..{last_frame}: one VID1 sprite-state run "
+                f"resolved to conflicting MPEG-4 VOL shapes ({details})"
+            )
+
+        if output_configs:
+            output_config = next(iter(output_configs))
+            for index in range(start, end):
+                if resolved_pictures[index].sprite_config != output_config:
+                    resolved_pictures[index] = replace(
+                        resolved_pictures[index],
+                        sprite_config=output_config,
+                    )
+                    backfilled += 1
+
+        start = end
+
+    if backfilled and reporter is not None:
+        reporter.info(
+            f"backfilled resolved GMC VOL state across {backfilled} earlier frame(s)",
+            level=1,
+        )
+    return resolved_pictures
+
+
 def parse_picture_sequence(
     chunks: Sequence[RawVideoChunk],
     *,
@@ -1621,7 +1711,7 @@ def parse_picture_sequence(
             fixed16_mapping=fixed16_mapping,
         )
         pictures.append(picture)
-    return pictures
+    return resolve_sprite_vol_state(pictures, reporter=reporter)
 
 
 def probe_header_skip(
@@ -3261,6 +3351,42 @@ def run_self_tests() -> None:
     )
     assert p_picture.p_frame_preamble == 0
     assert bytes(p_picture.payload) == b"\x80"
+
+    # Auto mode may resolve the output sprite shape only at the first S picture.
+    # Backfill it to earlier pictures in the same source-state run so the adapter
+    # does not replace a no-sprite VOL in the middle of a predictive GOP.
+    unresolved_sprite_picture = replace(
+        extended_picture,
+        index=0,
+        source_sprite_config=SpriteConfig(2, 3),
+        sprite_config=None,
+    )
+    resolved_sprite_picture = replace(
+        extended_picture,
+        index=1,
+        frame_type=3,
+        source_sprite_config=SpriteConfig(2, 3),
+        sprite_config=SpriteConfig(2, 3),
+    )
+    sprite_resolved = resolve_sprite_vol_state(
+        (unresolved_sprite_picture, resolved_sprite_picture)
+    )
+    assert sprite_resolved[0].sprite_config == SpriteConfig(2, 3)
+    assert sprite_resolved[1].sprite_config == SpriteConfig(2, 3)
+
+    # A legacy fixed16 translation can resolve to a one-point MPEG-4 sprite even
+    # when VID1 advertised more source points; backfill the converted shape.
+    translated_sprite_picture = replace(
+        resolved_sprite_picture,
+        sprite_config=SpriteConfig(1, 3),
+    )
+    translation_resolved = resolve_sprite_vol_state(
+        (unresolved_sprite_picture, translated_sprite_picture)
+    )
+    assert all(
+        picture.sprite_config == SpriteConfig(1, 3)
+        for picture in translation_resolved
+    )
 
     # Retail packed GMC words use sign/magnitude codes with axis-specific shifts.
     assert choose_fixed16_gmc_divisor("auto") == 16
