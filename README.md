@@ -120,6 +120,7 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
     * `Data/Game/cra/cra01.scg/streamed/STREAM_G02_I0002_T0F.flac`
 * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
+    * `Data/Game/cra/cra01.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
 * **`gatefmv2.vid`:** https://youtu.be/N0XYUlxVmWM?t=656
 * **`helmfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=0
