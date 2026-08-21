@@ -97,6 +97,14 @@ If a `.flac` file had lots of audio after the end of the `.vid` file (e.g. a cut
 ffmpeg -i audio.flac -map 0:a:0 -t "$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" -c:a flac audio.trimmed.flac
 ```
 
+### YouTube Longplay Matches
+For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches for identification:
+
+* ***The Lord of the Rings: The Return of the King* (GKLE69)**
+    * `crakfmv1.vid`: https://youtu.be/RS9HYaSOp5Y?t=20
+* ***The Lord of the Rings: The Third Age* (TODO)**
+    * TODO
+
 # Translating VID1 Video into M4V (deprecated)
 Because the VID1 *video codec* is very similar to MPEG-4 ASP, my original idea was to *translate* the VID1 video stream into MPEG-4 ASP as an M4V file using [`vid1_to_m4v.py`](vid1_to_m4v.py):
 
