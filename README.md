@@ -100,9 +100,24 @@ ffmpeg -i audio.flac -map 0:a:0 -t "$(ffprobe -v error -show_entries format=dura
 ### YouTube Longplay Matches
 For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches for identification:
 
-* ***The Lord of the Rings: The Return of the King* (GKLE69)**
-    * `crakfmv1.vid`: https://youtu.be/RS9HYaSOp5Y?t=20
-    * `endfmv1.vid`: https://youtu.be/RS9HYaSOp5Y?t=261
+* ***The Lord of the Rings: The Return of the King* (GKLE69):** https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
+    * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
+    * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
+    * **`gatefmv1.vid`:** TODO
+    * **`gatefmv2.vid`:** TODO
+    * **`helmfmv1.vid`:** TODO
+    * **`helmfmv2.vid`:** TODO
+    * **`isenfmv1.vid`:** TODO
+    * **`isenfmv2.vid`:** TODO
+    * **`mtwlfmv1.vid`:** TODO
+    * **`mtydfmv2.vid`:** TODO
+    * **`osgifmv1.vid`:** TODO
+    * **`osgifmv2.vid`:** TODO
+    * **`pat1fmv1.vid`:** TODO
+    * **`pat1fmv2.vid`:** TODO
+    * **`pat2fmv1.vid`:** TODO
+    * **`pelefmv1.vid`:** TODO
+    * **`shelfmv1.vid`:** TODO
 * ***The Lord of the Rings: The Third Age* (TODO)**
     * TODO
 
