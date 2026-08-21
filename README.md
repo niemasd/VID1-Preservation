@@ -10,7 +10,6 @@ This README will document all of my exploration, but here is a brief summary of 
 3. For *The Lord of the Rings: The Return of the King* and *The Lord of the Rings: The Third Age*, use [`extract_sc.py`](extract_sc.py) to extract all audio from the `.scg` files, and manually match them to their corresponding `.vid` files
     * Some audio will be extracted with the same name as the corresponding `.vid` file (just with the `.flac` extension)
     * However, some are ambiguously named and are longer than their corresponding `.vid` file and need to be trimmed (e.g. using `ffmpeg`)
-        * E.g. a cutscene that begins with an FMV in a `.vid` file but that transitions to in-engine rendering will have audio that spans the whole cutscene (not just the `.vid` portion)
     * This matching takes a lot of manual investigative work
 4. Use [MKVToolNix](https://mkvtoolnix.download/) to remux the video and audio streams of each `.vid` file into an MKV file
     * Not strictly necessary, but when remuxing with MKVToolNix, I also set the correct language for each video and audio stream
@@ -75,7 +74,9 @@ find . -type f -name '*.vid' -exec bash -c '
 ```
 
 ## *The Lord of the Rings*
-For *The Lord of the Rings: The Return of the King* and *The Lord of the Rings: The Third Age*, the `.vid` files do not contain any audio, but the videos *do* have audio when played in the game. The audio exists elsewhere on the disc, within proprietary `.scg` archives. First, use [`extract_sc.py`](extract_sc.py) to extract the contents of the corresponding `.scg` file:
+For *The Lord of the Rings: The Return of the King* and *The Lord of the Rings: The Third Age*, the `.vid` files do not contain any audio, but the videos *do* have audio when played in the game. The audio exists elsewhere on the disc, within proprietary `.scg` archives. The reason for this is that most cutscenes in these games mix FMVs (stored in `.vid` files) with in-engine rendering, so the audio of a given cutscene can be *longer* than the `.vid` file. Thus, to remux these videos with their correct audio, the audio segment corresponding to the `.vid` file may need to be cut out of the overall cutscene's audio (e.g. using `ffmpeg`).
+
+First, use [`extract_sc.py`](extract_sc.py) to extract the contents of the corresponding `.scg` file:
 
 ```bash
 python3 extract_sc.py archive.scg
@@ -87,17 +88,17 @@ To recursively run this on all `.scg` files nested within the current directory 
 find . -type f -name '*.scg' -exec python3 extract_sc.py -o OUT_DIR/{} {} \;
 ```
 
-Some audio will be extracted with the same name as the corresponding `.vid` file (just with the `.flac` extension), but some are ambiguously named and are longer than their corresponding `.vid` file and need to be trimmed (e.g. using `ffmpeg`). For example, a cutscene that begins with an FMV in a `.vid` file but that transitions to in-engine rendering will have audio that spans the whole cutscene (not just the `.vid` portion), meaning the corresponding `.flac` file will be *longer* than the corresponding `.vid` file. Unfortunately, many of the audio streams in a `.scg` file are not identified in any meaningful way (at least not by the extraction script), and many of the audio streams are irrelevant (e.g. in-game sound effects).
+Some audio (e.g. for cutscenes that are *just* `.vid` FMV) will be extracted with the same name as the corresponding `.vid` file (just with the `.flac` extension), but some are ambiguously named. Unfortunately, many of the audio streams in a `.scg` file are not identified in any meaningful way (at least not by the extraction script), and many of the audio streams are irrelevant (e.g. in-game sound effects).
 
-As a result, matching a `.vid` file to its corresponding `.flac` file takes some manual work. My approach was to start with `.flac` files that had a name matching a `.vid` file (double-checking that the duration of the `.flac` file is less than or equal to the duration of the `.vid` file). Then, for all remaining `.vid` files, I went through the `.flac` files with a duration greater than or equal to it (or maybe slightly shorter) in search of one that begins with the audio that matches the video (using YouTube longplay videos of the game to find the cutscene and hear the correct audio).
+As a result, matching a `.vid` file to its corresponding `.flac` file takes some manual work. My approach was to start with `.flac` files that had a name matching a `.vid` file (double-checking that the duration of the `.flac` file is less than or equal to the duration of the `.vid` file). Then, for all remaining `.vid` files, I went through the `.flac` files with a duration greater than or equal to it (or maybe slightly shorter) in search of one that begins with the audio that matches the video (using YouTube longplay videos of the game to find the cutscene and hear the correct audio). The relevant FLACs seem to all be in the `streamed` sub-folders.
 
-If a `.flac` file had audio *after the end* of the `.vid` file (e.g. a cutscene that transitions from `.vid` FMV to in-engine), I used the following command to extract the **beginning** of the `.flac` file:
+If a `.flac` file matched the *start* of the `.vid` file but had audio *after the end* of the `.vid` file (e.g. a cutscene that transitions from `.vid` FMV to in-engine), I used the following command to extract the **beginning** of the `.flac` file:
 
 ```bash
 ffmpeg -i audio.flac -map 0:a:0 -t "$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" -c:a flac -compression_level 12 audio.trimmed.flac
 ```
 
-If a a `.flac` file had audio *before the start* of the `.vid` file (e.g. a cutscene that transitions from in-engine to `.vid` FMV), I used the following command to extract the **end** of the `.flac` file:
+If a a `.flac` file matched the *end* of the `.vid` fil but had audio *before the start* of the `.vid` file (e.g. a cutscene that transitions from in-engine to `.vid` FMV), I used the following command to extract the **end** of the `.flac` file:
 
 ```bash
 d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" && ffmpeg -sseof "-$d" -i audio.flac -map 0:a:0 -t "$d" -c:a flac -compression_level 12 audio.trimmed.flac
