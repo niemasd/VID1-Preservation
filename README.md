@@ -113,9 +113,9 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
     * **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
     * **`osgifmv1.vid`:** https://youtu.be/5IjEfHZxcSM?t=21
     * **`osgifmv2.vid`:** https://youtu.be/5IjEfHZxcSM?t=829
-    * **`pat1fmv1.vid`:** TODO
-    * **`pat1fmv2.vid`:** TODO
-    * **`pat2fmv1.vid`:** TODO
+    * **`pat1fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=29
+    * **`pat1fmv2.vid`:** https://youtu.be/JtgPV8jRLLg?t=866
+    * **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
     * **`pelefmv1.vid`:** TODO
     * **`shelfmv1.vid`:** TODO
 * ***The Lord of the Rings: The Third Age* (TODO)**
