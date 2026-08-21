@@ -104,7 +104,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
     * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
     * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
     * **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
-    * **`gatefmv2.vid`:** TODO
+    * **`gatefmv2.vid`:** https://youtu.be/N0XYUlxVmWM?t=656
     * **`helmfmv1.vid`:** TODO
     * **`helmfmv2.vid`:** TODO
     * **`isenfmv1.vid`:** TODO
