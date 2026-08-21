@@ -31,6 +31,12 @@ with U/V from the second.  That is the closest component-wise mapping
 available through a stock MPEG-4 decoder, but it remains an inferred mapping
 because the public VID1 notes do not fully specify the extension.
 
+Some retail streams set an extended-header field-syntax bit.  Their
+macroblocks use MPEG-4's interlace-capable grammar even though the decoded
+pictures are presented progressively, and their P pictures include a separate
+zero preamble byte before the macroblock payload.  The adapter preserves that
+grammar, removes the preamble, and marks the decoded output progressive.
+
 Examples:
 
     python3 vid1_decode.py input.vid output.mkv
@@ -69,7 +75,7 @@ ByteBuffer = Union[bytes, memoryview]
 
 
 PROGRAM = "vid1_decode.py"
-VERSION = "5.0"
+VERSION = "5.1"
 
 
 def tag(text: str) -> int:
@@ -334,6 +340,13 @@ class Picture:
     source_sprite_config: Optional[SpriteConfig] = None
     gmc_mapping: Optional[str] = None
     gmc_conversion_divisor: Optional[int] = None
+    # The first trailing extended-header flag selects an MPEG-4-compatible
+    # field/interlace macroblock grammar.  The decoded pictures themselves are
+    # still presented progressively.  P pictures in this mode carry one
+    # separate zero preamble byte before the macroblock payload.
+    field_syntax: bool = False
+    extension_flag_2: bool = False
+    p_frame_preamble: Optional[int] = None
 
     @property
     def frame_name(self) -> str:
@@ -352,6 +365,12 @@ class ParseState:
     chroma_matrix: Optional[tuple[int, ...]] = None
     gmc_format: Optional[str] = None
     fixed16_mapping: Optional[str] = None
+    # Some VID1 streams use the MPEG-4 interlace-capable macroblock grammar
+    # even though their pictures are displayed progressively.  The first of
+    # the two trailing extended-header bits selects that grammar.  Keep the
+    # second bit for diagnostics until its meaning is known.
+    field_syntax: bool = False
+    extension_flag_2: bool = False
 
 
 @dataclass
@@ -1383,6 +1402,8 @@ def parse_picture(
 
     source_sprite = state.source_sprite
     output_sprite = state.output_sprite
+    field_syntax = state.field_syntax
+    extension_flag_2 = state.extension_flag_2
     uses_extended_quant = False
     luma_order: Optional[str] = None
     chroma_order: Optional[str] = None
@@ -1422,8 +1443,16 @@ def parse_picture(
                 state.chroma_matrix, chroma_order = normalize_matrix(
                     raw_chroma, matrix_order, lenient=lenient
                 )
-        bits.read_bit()  # ignored
-        bits.read_bit()  # ignored
+        # These two stream-state bits were previously discarded.  Streams such
+        # as THAW's GameCube movies set the first bit and then use the
+        # interlace-capable MPEG-4 macroblock grammar (field-DCT/field-prediction
+        # syntax) while still carrying progressive-looking pictures.  The
+        # second bit remains unidentified, so retain it without assigning
+        # semantics.
+        field_syntax = bool(bits.read_bit())
+        extension_flag_2 = bool(bits.read_bit())
+        state.field_syntax = field_syntax
+        state.extension_flag_2 = extension_flag_2
 
     rounding = bits.read_bit()
     intra_dc = bits.read(3)
@@ -1471,7 +1500,27 @@ def parse_picture(
         output_sprite = state.output_sprite
 
     bits.align_byte()
-    payload = packet[bits.bytepos :]
+    payload_start = bits.bytepos
+    p_frame_preamble: Optional[int] = None
+    if frame_type == 1 and field_syntax:
+        # In this VID1 syntax variant every P picture has one byte between the
+        # byte-aligned proprietary picture header and the first MPEG-4
+        # macroblock bit.  It is always zero in the retail stream and is not
+        # part of the MPEG-4 payload; copying it made FFmpeg treat the frame as
+        # corrupt and conceal most of the picture.
+        if payload_start >= len(packet):
+            raise VID1Error(
+                f"frame {index}: field-syntax P picture has no preamble byte"
+            )
+        p_frame_preamble = int(packet[payload_start])
+        payload_start += 1
+        if p_frame_preamble != 0:
+            raise VID1Error(
+                f"frame {index}: field-syntax P preamble is "
+                f"0x{p_frame_preamble:02x}, expected 0x00"
+            )
+
+    payload = packet[payload_start:]
     if not payload:
         raise VID1Error(f"frame {index}: no macroblock payload after picture header")
 
@@ -1500,6 +1549,9 @@ def parse_picture(
         payload=payload,
         ignored16=ignored16,
         extended_info_present=extended,
+        field_syntax=field_syntax,
+        extension_flag_2=extension_flag_2,
+        p_frame_preamble=p_frame_preamble,
         sprite_config=output_sprite,
         trajectory_bits=trajectory,
         uses_extended_quant=uses_extended_quant,
@@ -1871,6 +1923,7 @@ def write_vol(
     *,
     quant_pair: Optional[MatrixPair],
     sprite: Optional[SpriteConfig],
+    field_syntax: bool,
 ) -> None:
     if not 1 <= config.width <= 8191 or not 1 <= config.height <= 8191:
         raise VID1Error(
@@ -1911,7 +1964,10 @@ def write_vol(
     writer.write_bits(1, 1)       # marker before height
     writer.write_bits(13, config.height)
     writer.write_bits(1, 1)       # marker after height
-    writer.write_bits(1, 0)       # interlaced = false
+    # VID1's field-syntax variant carries the two extra per-VOP field flags and
+    # uses the corresponding MPEG-4 macroblock grammar.  Setting the VOL flag
+    # is an adapter requirement; decoded output is still tagged progressive.
+    writer.write_bits(1, int(field_syntax))
     writer.write_bits(1, 1)       # obmc_disable = true
 
     if sprite is None:
@@ -1981,6 +2037,13 @@ def write_vop_header(
     if picture.frame_type in (1, 3):
         writer.write_bit(picture.rounding)
     writer.write_bits(3, picture.intra_dc_vlc_thr_idx)
+
+    if picture.field_syntax:
+        # The source pictures do not expose meaningful field-order controls.
+        # Neutral values make FFmpeg consume the VID1 field-syntax macroblock
+        # grammar without changing the displayed line order.
+        writer.write_bit(0)  # top_field_first
+        writer.write_bit(0)  # alternate_vertical_scan_flag
 
     if picture.frame_type == 3:
         writer.write_bit_sequence(picture.trajectory_bits)
@@ -2055,12 +2118,20 @@ def write_adapted_stream(
             quant_pair = selected_quant_pair(picture, config.matrix_plane)
             # Sprite/GMC parameters are VOL state, not per-VOP state.  Once the
             # VID1 header has supplied them, keep them active for ordinary I/P/B
-            # pictures as well as S pictures.  The ordinary macroblock grammar
-            # is unchanged; only S-VOP macroblocks consume mcsel/trajectory data.
+            # pictures as well as S pictures.  Sprite state and field-syntax
+            # state are both VOL-level adapter settings; S-VOP macroblocks alone
+            # consume the GMC trajectory, while field syntax changes the common
+            # macroblock grammar for every picture type.
             sprite = picture.sprite_config
-            vol_key = (quant_pair, sprite)
+            vol_key = (quant_pair, sprite, picture.field_syntax)
             if vol_key != previous_vol_key:
-                write_vol(writer, config, quant_pair=quant_pair, sprite=sprite)
+                write_vol(
+                    writer,
+                    config,
+                    quant_pair=quant_pair,
+                    sprite=sprite,
+                    field_syntax=picture.field_syntax,
+                )
                 previous_vol_key = vol_key
 
             write_vop_header(writer, picture, config, time_state)
@@ -2238,8 +2309,9 @@ def m4v_decode_prefix(
     *,
     idct: str,
     decode_threads: int,
+    force_progressive: bool,
 ) -> list[str]:
-    return [
+    command = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
@@ -2262,11 +2334,19 @@ def m4v_decode_prefix(
         "-map",
         "0:v:0",
         "-an",
+    ]
+    if force_progressive:
+        # The adapter may enable MPEG-4's interlace-capable syntax solely so
+        # FFmpeg consumes VID1's extra macroblock fields.  setfield changes
+        # frame metadata only; it does not deinterlace or alter pixel values.
+        command += ["-vf", "setfield=prog"]
+    command += [
         "-fps_mode",
         "passthrough",
         "-pix_fmt",
         "yuv420p",
     ]
+    return command
 
 
 def decode_m4v_to_raw(
@@ -2278,6 +2358,7 @@ def decode_m4v_to_raw(
     height: int,
     idct: str,
     decode_threads: int,
+    force_progressive: bool,
     expected_frames: int,
     reporter: Reporter,
     description: str = "Decoding MPEG-4 adapter",
@@ -2287,6 +2368,7 @@ def decode_m4v_to_raw(
         adapted,
         idct=idct,
         decode_threads=decode_threads,
+        force_progressive=force_progressive,
     ) + [
         "-f",
         "rawvideo",
@@ -2326,6 +2408,7 @@ def decode_m4v_to_output(
     fps: Fraction,
     idct: str,
     decode_threads: int,
+    force_progressive: bool,
     expected_frames: int,
     reporter: Reporter,
 ) -> tuple[int, str]:
@@ -2334,6 +2417,7 @@ def decode_m4v_to_output(
         adapted,
         idct=idct,
         decode_threads=decode_threads,
+        force_progressive=force_progressive,
     )
     if output_format == "ffv1":
         description = "Decoding and encoding lossless FFV1"
@@ -2344,8 +2428,6 @@ def decode_m4v_to_output(
             "3",
             "-g",
             "1",
-            "-pix_fmt",
-            "yuv420p",
             "-f",
             "matroska",
             "-y",
@@ -2356,8 +2438,6 @@ def decode_m4v_to_output(
         command += [
             "-c:v",
             "rawvideo",
-            "-pix_fmt",
-            "yuv420p",
             "-f",
             "yuv4mpegpipe",
             "-y",
@@ -2591,11 +2671,20 @@ def picture_summary(pictures: Sequence[Picture]) -> dict[str, object]:
     gmc_mappings: dict[str, int] = {}
     fixed16_zero_tail = 0
     fixed16_nonzero_tail = 0
+    field_syntax_frames = 0
+    field_syntax_preambles = 0
+    extension_flag_2_frames = 0
+    preamble_values: set[int] = set()
     for picture in pictures:
         counts[picture.frame_name] = counts.get(picture.frame_name, 0) + 1
         extended_quant += int(picture.uses_extended_quant)
         custom_luma += int(picture.matrix_order_luma is not None)
         custom_chroma += int(picture.matrix_order_chroma is not None)
+        field_syntax_frames += int(picture.field_syntax)
+        extension_flag_2_frames += int(picture.extension_flag_2)
+        if picture.p_frame_preamble is not None:
+            field_syntax_preambles += 1
+            preamble_values.add(picture.p_frame_preamble)
         if picture.gmc_source_format is not None:
             gmc_formats[picture.gmc_source_format] = (
                 gmc_formats.get(picture.gmc_source_format, 0) + 1
@@ -2619,6 +2708,10 @@ def picture_summary(pictures: Sequence[Picture]) -> dict[str, object]:
         "gmc_mappings": gmc_mappings,
         "fixed16_zero_tail_frames": fixed16_zero_tail,
         "fixed16_nonzero_tail_frames": fixed16_nonzero_tail,
+        "field_syntax_frames": field_syntax_frames,
+        "field_syntax_p_frames": field_syntax_preambles,
+        "field_syntax_preamble_values": sorted(preamble_values),
+        "extension_flag_2_frames": extension_flag_2_frames,
         "first_timecode": pictures[0].timecode if pictures else None,
         "last_timecode": pictures[-1].timecode if pictures else None,
     }
@@ -2782,6 +2875,18 @@ def convert(args: argparse.Namespace) -> None:
         f"{summary['frames']} frames, types={summary['frame_types']}, "
         f"timing={timing_mode}"
     )
+    field_syntax_count = int(summary["field_syntax_frames"])
+    if field_syntax_count:
+        reporter.status(
+            f"VID1 field-syntax mode: {field_syntax_count} frame(s); "
+            f"removed {summary['field_syntax_p_frames']} zero P-frame preamble(s)"
+        )
+    if int(summary["extension_flag_2_frames"]):
+        reporter.warn(
+            f"the unidentified second VID1 extension flag is set for "
+            f"{summary['extension_flag_2_frames']} frame(s); its semantics are not mapped"
+        )
+
     fixed16_count = int(summary["gmc_formats"].get("fixed16", 0))
     if fixed16_count:
         mappings = summary["gmc_mappings"]
@@ -2897,6 +3002,7 @@ def convert(args: argparse.Namespace) -> None:
                     fps=fps,
                     idct=args.idct,
                     decode_threads=args.decode_threads,
+                    force_progressive=bool(field_syntax_count),
                     expected_frames=len(pictures),
                     reporter=reporter,
                 )
@@ -2910,6 +3016,7 @@ def convert(args: argparse.Namespace) -> None:
                     height=height,
                     idct=args.idct,
                     decode_threads=args.decode_threads,
+                    force_progressive=bool(field_syntax_count),
                     expected_frames=len(pictures),
                     reporter=reporter,
                     description="Decoding luma-matrix pass",
@@ -2934,6 +3041,7 @@ def convert(args: argparse.Namespace) -> None:
                     height=height,
                     idct=args.idct,
                     decode_threads=args.decode_threads,
+                    force_progressive=bool(field_syntax_count),
                     expected_frames=len(pictures),
                     reporter=reporter,
                     description="Decoding chroma-matrix pass",
@@ -3048,7 +3156,30 @@ def run_self_tests() -> None:
 
     # Timecode and GOP ordering for I P B B P B.
     mock = [
-        Picture(i, 0, t, 0, 0, 2, 1, 1, tc, b"x", 0, False, None, (), False, None, None, None, None)
+        Picture(
+            index=i,
+            chunk_offset=0,
+            frame_type=t,
+            rounding=0,
+            intra_dc_vlc_thr_idx=0,
+            quant=2,
+            fcode_forward=1,
+            fcode_backward=1,
+            timecode=tc,
+            payload=b"x",
+            ignored16=0,
+            extended_info_present=False,
+            field_syntax=False,
+            extension_flag_2=False,
+            p_frame_preamble=None,
+            sprite_config=None,
+            trajectory_bits=(),
+            uses_extended_quant=False,
+            luma_quant=None,
+            chroma_quant=None,
+            matrix_order_luma=None,
+            matrix_order_chroma=None,
+        )
         for i, (t, tc) in enumerate(((0, 0), (1, 3), (2, 1), (2, 2), (1, 5), (2, 4)))
     ]
     assert assign_timecode_indices(mock) == [0, 3, 1, 2, 5, 4]
@@ -3067,6 +3198,69 @@ def run_self_tests() -> None:
     write_picture_payload(writer, b"\x80", trim_packet_padding=True)
     writer.close()
     assert trimmed.getvalue() == b"\x80"
+
+    # Extended VID1 headers propagate the field-syntax flag, and P pictures in
+    # that mode discard their separate zero preamble before exposing MPEG-4
+    # macroblock bits.
+    extended_packet = io.BytesIO()
+    writer = BitWriter(extended_packet)
+    writer.write_bits(16, 1)  # VID1 sync
+    writer.write_bits(2, 0)   # I
+    writer.write_bit(1)       # extended header
+    writer.write_bit(0)       # sprite update absent
+    writer.write_bit(0)       # extended quant absent
+    writer.write_bit(1)       # field syntax
+    writer.write_bit(0)       # second extension flag
+    writer.write_bit(0)       # rounding
+    writer.write_bits(3, 0)   # intra DC threshold
+    writer.write_bits(5, 2)   # quantiser
+    writer.write_bits(32, 0)  # timecode
+    writer.align_zero()
+    writer.write_bits(8, 0x80)
+    writer.close()
+    field_state = ParseState()
+    extended_picture = parse_picture(
+        extended_packet.getvalue(),
+        index=0,
+        chunk_offset=0,
+        state=field_state,
+        matrix_order="auto",
+        lenient=False,
+        gmc_format="auto",
+        fixed16_divisor=16,
+        fixed16_mapping="auto",
+    )
+    assert extended_picture.field_syntax
+    assert field_state.field_syntax
+    assert bytes(extended_picture.payload) == b"\x80"
+
+    p_packet = io.BytesIO()
+    writer = BitWriter(p_packet)
+    writer.write_bits(16, 1)  # VID1 sync
+    writer.write_bits(2, 1)   # P
+    writer.write_bit(0)       # no extended header; inherit field syntax
+    writer.write_bit(0)       # rounding
+    writer.write_bits(3, 0)   # intra DC threshold
+    writer.write_bits(5, 2)   # quantiser
+    writer.write_bits(3, 1)   # forward fcode
+    writer.write_bits(32, 1)  # timecode
+    writer.align_zero()
+    writer.write_bits(8, 0x00)  # VID1 P-picture preamble
+    writer.write_bits(8, 0x80)  # macroblock payload
+    writer.close()
+    p_picture = parse_picture(
+        p_packet.getvalue(),
+        index=1,
+        chunk_offset=0,
+        state=field_state,
+        matrix_order="auto",
+        lenient=False,
+        gmc_format="auto",
+        fixed16_divisor=16,
+        fixed16_mapping="auto",
+    )
+    assert p_picture.p_frame_preamble == 0
+    assert bytes(p_picture.payload) == b"\x80"
 
     # Retail packed GMC words use sign/magnitude codes with axis-specific shifts.
     assert choose_fixed16_gmc_divisor("auto") == 16
