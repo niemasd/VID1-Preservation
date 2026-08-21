@@ -103,7 +103,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * ***The Lord of the Rings: The Return of the King* (GKLE69):** https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
     * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
     * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
-    * **`gatefmv1.vid`:** TODO
+    * **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
     * **`gatefmv2.vid`:** TODO
     * **`helmfmv1.vid`:** TODO
     * **`helmfmv2.vid`:** TODO
