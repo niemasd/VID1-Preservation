@@ -39,9 +39,12 @@ because the public VID1 notes do not fully specify the extension.
 
 Some retail streams set an extended-header field-syntax bit.  Their
 macroblocks use MPEG-4's interlace-capable grammar even though the decoded
-pictures are presented progressively, and their P pictures include a separate
-zero preamble byte before the macroblock payload.  The adapter preserves that
-grammar, removes the preamble, and marks the decoded output progressive.
+pictures are presented progressively.  I/P/B picture headers in this variant
+can end with a one-bit payload marker followed by zero fill to the next byte;
+when the header itself is byte-aligned, as in Battalion Wars I pictures, that
+marker appears as a standalone ``0x80`` byte.  P pictures additionally carry a
+separate zero preamble byte.  The adapter consumes the marker/alignment and P
+preamble, preserves the field grammar, and marks decoded output progressive.
 
 Examples:
 
@@ -81,7 +84,7 @@ ByteBuffer = Union[bytes, memoryview]
 
 
 PROGRAM = "vid1_decode.py"
-VERSION = "5.3"
+VERSION = "5.4"
 
 
 def tag(text: str) -> int:
@@ -348,8 +351,9 @@ class Picture:
     gmc_conversion_divisor: Optional[int] = None
     # The first trailing extended-header flag selects an MPEG-4-compatible
     # field/interlace macroblock grammar.  The decoded pictures themselves are
-    # still presented progressively.  P pictures in this mode carry one
-    # separate zero preamble byte before the macroblock payload.
+    # still presented progressively.  I/P/B headers in this mode may end in a
+    # one-bit payload marker plus zero alignment; P pictures then carry one
+    # additional zero preamble byte before the macroblock payload.
     field_syntax: bool = False
     extension_flag_2: bool = False
     p_frame_preamble: Optional[int] = None
@@ -1386,6 +1390,42 @@ def normalize_matrix(
     return row_candidate, "row(auto)"
 
 
+def align_picture_payload(
+    bits: BitReaderMSB,
+    *,
+    frame_type: int,
+    field_syntax: bool,
+) -> bool:
+    """Advance to macroblock data, recognising the field-syntax marker.
+
+    In the observed field-syntax I/P/B headers, the first alignment bit is one
+    and all remaining bits through the byte boundary are zero.  Most headers
+    are not byte-aligned, so the old generic alignment happened to discard
+    that pattern.  A byte-aligned header exposes it as a complete ``0x80``
+    byte, which must also be consumed before copying MPEG-4 macroblocks.
+
+    Return whether that marker pattern was recognised.  Falling back to the
+    old byte alignment preserves compatibility with streams that place their
+    macroblock payload directly after the proprietary header.
+    """
+    if not field_syntax or frame_type == 3:
+        bits.align_byte()
+        return False
+
+    start = bits.bitpos
+    if bits.bits_left:
+        marker = bits.read_bit()
+        padding = (-bits.bitpos) & 7
+        if bits.bits_left >= padding:
+            fill = bits.read(padding) if padding else 0
+            if marker == 1 and fill == 0:
+                return True
+
+    bits.bitpos = start
+    bits.align_byte()
+    return False
+
+
 def parse_picture(
     packet: ByteBuffer,
     *,
@@ -1517,7 +1557,11 @@ def parse_picture(
     else:
         output_sprite = state.output_sprite
 
-    bits.align_byte()
+    align_picture_payload(
+        bits,
+        frame_type=frame_type,
+        field_syntax=field_syntax,
+    )
     payload_start = bits.bytepos
     p_frame_preamble: Optional[int] = None
     if frame_type == 1 and field_syntax:
@@ -3343,9 +3387,10 @@ def run_self_tests() -> None:
     writer.close()
     assert trimmed.getvalue() == b"\x80"
 
-    # Extended VID1 headers propagate the field-syntax flag, and P pictures in
-    # that mode discard their separate zero preamble before exposing MPEG-4
-    # macroblock bits.
+    # Extended VID1 headers propagate the field-syntax flag.  A byte-aligned
+    # I header exposes its one-bit payload marker as a standalone 0x80 byte;
+    # consume it before exposing the MPEG-4 macroblocks.  P pictures also
+    # discard their separate zero-byte preamble.
     extended_packet = io.BytesIO()
     writer = BitWriter(extended_packet)
     writer.write_bits(16, 1)  # VID1 sync
@@ -3358,9 +3403,10 @@ def run_self_tests() -> None:
     writer.write_bit(0)       # rounding
     writer.write_bits(3, 0)   # intra DC threshold
     writer.write_bits(5, 2)   # quantiser
-    writer.write_bits(32, 0)  # timecode
-    writer.align_zero()
-    writer.write_bits(8, 0x80)
+    writer.write_bits(32, 0)  # timecode; header now ends on a byte boundary
+    writer.write_bit(1)       # VID1 payload marker
+    writer.align_zero()       # seven zero fill bits, forming standalone 0x80
+    writer.write_bits(8, 0xCC)  # macroblock payload
     writer.close()
     field_state = ParseState()
     extended_picture = parse_picture(
@@ -3376,7 +3422,37 @@ def run_self_tests() -> None:
     )
     assert extended_picture.field_syntax
     assert field_state.field_syntax
-    assert bytes(extended_picture.payload) == b"\x80"
+    assert bytes(extended_picture.payload) == b"\xCC"
+
+    # Preserve compatibility with a byte-aligned field-syntax I header that
+    # begins its macroblock payload directly rather than with the marker byte.
+    direct_i_packet = io.BytesIO()
+    writer = BitWriter(direct_i_packet)
+    writer.write_bits(16, 1)  # VID1 sync
+    writer.write_bits(2, 0)   # I
+    writer.write_bit(1)       # extended header
+    writer.write_bit(0)       # sprite update absent
+    writer.write_bit(0)       # extended quant absent
+    writer.write_bit(1)       # field syntax
+    writer.write_bit(0)       # second extension flag
+    writer.write_bit(0)       # rounding
+    writer.write_bits(3, 0)   # intra DC threshold
+    writer.write_bits(5, 2)   # quantiser
+    writer.write_bits(32, 1)  # timecode; byte-aligned header
+    writer.write_bits(8, 0xCC)  # direct macroblock payload, no marker
+    writer.close()
+    direct_i_picture = parse_picture(
+        direct_i_packet.getvalue(),
+        index=1,
+        chunk_offset=0,
+        state=field_state,
+        matrix_order="auto",
+        lenient=False,
+        gmc_format="auto",
+        fixed16_divisor=16,
+        fixed16_mapping="auto",
+    )
+    assert bytes(direct_i_picture.payload) == b"\xCC"
 
     p_packet = io.BytesIO()
     writer = BitWriter(p_packet)
@@ -3387,14 +3463,15 @@ def run_self_tests() -> None:
     writer.write_bits(3, 0)   # intra DC threshold
     writer.write_bits(5, 2)   # quantiser
     writer.write_bits(3, 1)   # forward fcode
-    writer.write_bits(32, 1)  # timecode
+    writer.write_bits(32, 1)  # timecode; header is one bit short of a byte
+    writer.write_bit(1)       # VID1 payload marker completes the byte
     writer.align_zero()
     writer.write_bits(8, 0x00)  # VID1 P-picture preamble
     writer.write_bits(8, 0x80)  # macroblock payload
     writer.close()
     p_picture = parse_picture(
         p_packet.getvalue(),
-        index=1,
+        index=2,
         chunk_offset=0,
         state=field_state,
         matrix_order="auto",
