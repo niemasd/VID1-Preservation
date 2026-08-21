@@ -111,8 +111,8 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
     * **`isenfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=1306
     * **`mtwlfmv1.vid`:** https://youtu.be/BKy6IZ8HuCE?t=21
     * **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
-    * **`osgifmv1.vid`:** TODO
-    * **`osgifmv2.vid`:** TODO
+    * **`osgifmv1.vid`:** https://youtu.be/5IjEfHZxcSM?t=21
+    * **`osgifmv2.vid`:** https://youtu.be/5IjEfHZxcSM?t=829
     * **`pat1fmv1.vid`:** TODO
     * **`pat1fmv2.vid`:** TODO
     * **`pat2fmv1.vid`:** TODO
