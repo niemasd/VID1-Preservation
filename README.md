@@ -91,13 +91,13 @@ Some audio will be extracted with the same name as the corresponding `.vid` file
 
 As a result, matching a `.vid` file to its corresponding `.flac` file takes some manual work. My approach was to start with `.flac` files that had a name matching a `.vid` file (double-checking that the duration of the `.flac` file is less than or equal to the duration of the `.vid` file). Then, for all remaining `.vid` files, I went through the `.flac` files with a duration greater than or equal to it (or maybe slightly shorter) in search of one that begins with the audio that matches the video (using YouTube longplay videos of the game to find the cutscene and hear the correct audio).
 
-If a `.flac` file had audio *after the end* of the `.vid` file (e.g. a cutscene that transitions from `.vid` FMV to in-engine), I used the following command to extract the beginning of the `.flac` file:
+If a `.flac` file had audio *after the end* of the `.vid` file (e.g. a cutscene that transitions from `.vid` FMV to in-engine), I used the following command to extract the **beginning** of the `.flac` file:
 
 ```bash
 ffmpeg -i audio.flac -map 0:a:0 -t "$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" -c:a flac -compression_level 12 audio.trimmed.flac
 ```
 
-If a a `.flac` file had audio *before the start* of the `.vid` file (e.g. a cutscene that transitions from in-engine to `.vid` FMV), I used the following command to extract the end of the `.flac` file:
+If a a `.flac` file had audio *before the start* of the `.vid` file (e.g. a cutscene that transitions from in-engine to `.vid` FMV), I used the following command to extract the **end** of the `.flac` file:
 
 ```bash
 d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" && ffmpeg -sseof "-$d" -i audio.flac -map 0:a:0 -t "$d" -c:a flac -compression_level 12 audio.trimmed.flac
@@ -118,6 +118,7 @@ I used this YouTube playlist:
 https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 
 * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
+    * `Data/Game/cra/cra01.scg/streamed/STREAM_G02_I0002_T0F.flac`
 * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
 * **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
 * **`gatefmv2.vid`:** https://youtu.be/N0XYUlxVmWM?t=656
