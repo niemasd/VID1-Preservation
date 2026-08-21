@@ -166,7 +166,7 @@ find . -type f -name '*.vid' -exec sh -c '"$HOME/VID1-Preservation/vid1_decode.p
 ```
 
 # Remuxing Video and Audio
-The above
+Given perfectly-matching extracted video and audio files `video.mkv` and `audio.flac`, I then remuxed them into a single MKV file using [MKVToolNix](https://mkvtoolnix.download/). While doing so, I removed all tags (seemingly only from `video.mkv`), set the language codes for each stream, and enabled "Default track" flags (seemingly only needed for `video.mkv`). These additional steps aren't strictly necessary, but I thought it would be good to do for the sake of completeness.
 
 # Acknowledgements
 * [Paul B Mahol's VID1 container demuxer code](https://github.com/librempeg/librempeg/blob/f3b1734d25ad2baf023af729cca7a0e30427d8a1/libavformat/vid1.c)
