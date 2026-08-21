@@ -74,7 +74,7 @@ find . -type f -name '*.vid' -exec bash -c '
 ' _ {} +
 ```
 
-## The Lord of the Rings
+## *The Lord of the Rings*
 For *The Lord of the Rings: The Return of the King* and *The Lord of the Rings: The Third Age*, the `.vid` files do not contain any audio, but the videos *do* have audio when played in the game. The audio exists elsewhere on the disc, within proprietary `.scg` archives. First, use [`extract_sc.py`](extract_sc.py) to extract the contents of the corresponding `.scg` file:
 
 ```bash
@@ -100,26 +100,31 @@ ffmpeg -i audio.flac -map 0:a:0 -t "$(ffprobe -v error -show_entries format=dura
 ### YouTube Longplay Matches
 For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches to know what audio should be playing with it:
 
-* ***The Lord of the Rings: The Return of the King* (GKLE69):** https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
-    * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
-    * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
-    * **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
-    * **`gatefmv2.vid`:** https://youtu.be/N0XYUlxVmWM?t=656
-    * **`helmfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=0
-    * **`helmfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=382
-    * **`isenfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=715
-    * **`isenfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=1306
-    * **`mtwlfmv1.vid`:** https://youtu.be/BKy6IZ8HuCE?t=21
-    * **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
-    * **`osgifmv1.vid`:** https://youtu.be/5IjEfHZxcSM?t=21
-    * **`osgifmv2.vid`:** https://youtu.be/5IjEfHZxcSM?t=829
-    * **`pat1fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=29
-    * **`pat1fmv2.vid`:** https://youtu.be/JtgPV8jRLLg?t=866
-    * **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
-    * **`pelefmv1.vid`:** https://youtu.be/Fe0SuecJ7QQ?t=21
-    * **`shelfmv1.vid`:** https://youtu.be/Z_a3P4TS4lk?t=19
-* ***The Lord of the Rings: The Third Age* (TODO)**
-    * TODO
+#### *The Lord of the Rings: The Return of the King* (GKLE69)
+I used this YouTube playlist:
+
+https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
+
+* **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
+* **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
+* **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
+* **`gatefmv2.vid`:** https://youtu.be/N0XYUlxVmWM?t=656
+* **`helmfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=0
+* **`helmfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=382
+* **`isenfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=715
+* **`isenfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=1306
+* **`mtwlfmv1.vid`:** https://youtu.be/BKy6IZ8HuCE?t=21
+* **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
+* **`osgifmv1.vid`:** https://youtu.be/5IjEfHZxcSM?t=21
+* **`osgifmv2.vid`:** https://youtu.be/5IjEfHZxcSM?t=829
+* **`pat1fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=29
+* **`pat1fmv2.vid`:** https://youtu.be/JtgPV8jRLLg?t=866
+* **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
+* **`pelefmv1.vid`:** https://youtu.be/Fe0SuecJ7QQ?t=21
+* **`shelfmv1.vid`:** https://youtu.be/Z_a3P4TS4lk?t=19
+
+#### *The Lord of the Rings: The Third Age* (TODO)
+TODO
 
 # Translating VID1 Video into M4V (deprecated)
 Because the VID1 *video codec* is very similar to MPEG-4 ASP, my original idea was to *translate* the VID1 video stream into MPEG-4 ASP as an M4V file using [`vid1_to_m4v.py`](vid1_to_m4v.py):
