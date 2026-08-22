@@ -133,6 +133,7 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`isenfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=715
     * `Data/Game/ise/ise01.scg/streamed/STREAM_G02_I0010_T0F.flac`
 * **`isenfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=1306
+    * `Data/Game/ise/ise01.scg/streamed/ISENFMV2.flac`
 * **`mtwlfmv1.vid`:** https://youtu.be/BKy6IZ8HuCE?t=21
 * **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
 * **`osgifmv1.vid`:** https://youtu.be/5IjEfHZxcSM?t=21
