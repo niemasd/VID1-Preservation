@@ -82,10 +82,10 @@ First, use [`extract_sc.py`](extract_sc.py) to extract the contents of the corre
 python3 extract_sc.py archive.scg
 ```
 
-To recursively run this on all `.scg` files nested within the current directory (where `OUT_DIR` is the desired output directory):
+To recursively run this on all `.scg` files nested within the current directory (where `OUT_DIR` is the desired output directory) and skip the `resources` audio files (which seem to just be short sound effects):
 
 ```bash
-find . -type f -name '*.scg' -exec python3 extract_sc.py -o OUT_DIR/{} {} \;
+find . -type f -name '*.scg' -exec python3 extract_sc.py --skip_resources -o OUT_DIR/{} {} \;
 ```
 
 Some audio (e.g. for cutscenes that are *just* `.vid` FMV) will be extracted with the same name as the corresponding `.vid` file (just with the `.flac` extension), but some are ambiguously named. Unfortunately, many of the audio streams in a `.scg` file are not identified in any meaningful way (at least not by the extraction script), and many of the audio streams are irrelevant (e.g. in-game sound effects).
