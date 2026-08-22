@@ -113,10 +113,7 @@ d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.
 ### YouTube Longplay Matches
 For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches to know what audio should be playing with it:
 
-#### *The Lord of the Rings: The Return of the King* (GKLE69)
-I used this YouTube playlist:
-
-https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
+#### *The Lord of the Rings: The Return of the King* (DOL-GKLE-USA)
 
 * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
     * `Data/Game/cra/cra01.scg/streamed/STREAM_G02_I0002_T0F.flac`
@@ -154,8 +151,70 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`shelfmv1.vid`:** https://youtu.be/Z_a3P4TS4lk?t=19
     * `Data/Game/she/she01.scg/streamed/STREAM_G03_I0014_T0F.flac`
 
-#### *The Lord of the Rings: The Third Age* (TODO)
-TODO
+#### *The Lord of the Rings: The Third Age* (DOL-G3AE-USA)
+Part 1: https://www.youtube.com/watch?v=a0ulVhokkgU
+
+Part 2: https://www.youtube.com/watch?v=6lgO9cQg5qM
+
+##### Disc 1
+
+* **`attrloop.vid`:** TODO
+* **`e1c1f01.vid`:** TODO
+* **`e1c1f02.vid`:** TODO
+* **`e1c1f03.vid`:** TODO
+* **`e1c1f04.vid`:** TODO
+* **`e1c1f05.vid`:** TODO
+* **`e1c1f06.vid`:** TODO
+* **`e1c1f07.vid`:** TODO
+* **`e1c1f08.vid`:** TODO
+* **`e1c1f09.vid`:** TODO
+* **`e1c1f10.vid`:** TODO
+* **`e1c1f11.vid`:** TODO
+* **`e1c1f12.vid`:** TODO
+* **`e1c1idri.vid`:** TODO
+* **`e1c2f01.vid`:** TODO
+* **`e1c2f02.vid`:** TODO
+* **`e1c2f03.vid`:** TODO
+* **`e1c2f04.vid`:** TODO
+* **`e1c2f05.vid`:** TODO
+* **`e1c2f06.vid`:** TODO
+* **`e1c2f07.vid`:** TODO
+* **`e1c2f08.vid`:** TODO
+* **`e1c2f09.vid`:** TODO
+* **`e1c2f10.vid`:** TODO
+* **`e1c2f11.vid`:** TODO
+* **`e1c2f12.vid`:** TODO
+* **`e1c2f13.vid`:** TODO
+* **`e1c2f14.vid`:** TODO
+* **`e1c2f15.vid`:** TODO
+* **`e1c2f16.vid`:** TODO
+* **`e1c2f18.vid`:** TODO
+* **`e1c2f19.vid`:** TODO
+* **`e1c3f01.vid`:** TODO
+* **`e1c3f02.vid`:** TODO
+* **`e1c3f03.vid`:** TODO
+* **`e1c3f04.vid`:** TODO
+* **`e1c3f05.vid`:** TODO
+* **`e1c3f06.vid`:** TODO
+* **`e1c3f07.vid`:** TODO
+* **`e2c1f01.vid`:** TODO
+* **`e2c1f02.vid`:** TODO
+* **`e2c1f03.vid`:** TODO
+* **`e2c1f04.vid`:** TODO
+* **`e2c1f05.vid`:** TODO
+* **`e2c1f06.vid`:** TODO
+* **`e2c1f07.vid`:** TODO
+* **`e2c1f08.vid`:** TODO
+* **`e2c1f09.vid`:** TODO
+* **`e2c1f10.vid`:** TODO
+* **`e2c2f02.vid`:** TODO
+* **`e2c2f04.vid`:** TODO
+* **`e2c2f06.vid`:** TODO
+* **`logo.vid`:** TODO
+
+##### Disc 2
+
+* TODO
 
 # Translating VID1 Video into M4V (deprecated)
 Because the VID1 *video codec* is very similar to MPEG-4 ASP, my original idea was to *translate* the VID1 video stream into MPEG-4 ASP as an M4V file using [`vid1_to_m4v.py`](vid1_to_m4v.py):
