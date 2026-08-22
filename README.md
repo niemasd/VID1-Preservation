@@ -104,13 +104,7 @@ If a a `.flac` file matched the *end* of the `.vid` fil but had audio *before th
 d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" && ffmpeg -sseof "-$d" -i audio.flac -map 0:a:0 -t "$d" -c:a flac -compression_level 12 audio.trimmed.flac
 ```
 
-However, the `.vid` file might not be *exactly* at the beginning or end of the `.flac` file, in which case the timing needs to be calibrated manually. Once the desired start and end times of the `.flac` file are found, the following command will extract that exact segment:
-
-```bash
-ffmpeg -i audio.flac -map 0:a:0 -ss START_TIME -to END_TIME -c:a flac -compression_level 12 audio.trimmed.flac
-```
-
-To specify a starting time (`-ss`) but keep the duration exact:
+However, the `.vid` file might not be *exactly* at the beginning or end of the `.flac` file, in which case the timing needs to be calibrated manually. Once the desired start time of the `.flac` file is found, the following command will extract that exact segment:
 
 ```bash
 d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" && ffmpeg -i audio.flac -map 0:a:0 -ss START_TIME -t "$d" -c:a flac -compression_level 12 audio.trimmed.flac
