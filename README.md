@@ -123,7 +123,9 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
     * `Data/Game/cra/cra01.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
+    * `Data/Game/bla/bla01.scg/streamed/STREAM_G02_I0006_T0F.flac`
 * **`gatefmv2.vid`:** https://youtu.be/N0XYUlxVmWM?t=656
+    * `Data/Game/bla/bla01.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`helmfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=0
 * **`helmfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=382
 * **`isenfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=715
