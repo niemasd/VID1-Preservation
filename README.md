@@ -110,6 +110,12 @@ However, the `.vid` file might not be *exactly* at the beginning or end of the `
 ffmpeg -i audio.flac -map 0:a:0 -ss START_TIME -to END_TIME -c:a flac -compression_level 12 audio.trimmed.flac
 ```
 
+To specify a starting time (`-ss`) but keep the duration exact:
+
+```bash
+d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" && ffmpeg -i audio.flac -map 0:a:0 -ss START_TIME -t "$d" -c:a flac -compression_level 12 audio.trimmed.flac
+```
+
 ### YouTube Longplay Matches
 For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches to know what audio should be playing with it:
 
