@@ -210,7 +210,7 @@ Part 2: https://www.youtube.com/watch?v=6lgO9cQg5qM
 * **`e2c2f02.vid`:** TODO
 * **`e2c2f04.vid`:** TODO
 * **`e2c2f06.vid`:** TODO
-* **`logo.vid`:** TODO
+* **`logo.vid`:** https://youtu.be/a0ulVhokkgU?t=7
 
 ##### Disc 2
 
