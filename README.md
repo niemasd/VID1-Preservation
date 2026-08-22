@@ -141,6 +141,7 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
 * **`pelefmv1.vid`:** https://youtu.be/Fe0SuecJ7QQ?t=21
 * **`shelfmv1.vid`:** https://youtu.be/Z_a3P4TS4lk?t=19
+    * `Data/Game/she/she01.scg/streamed/STREAM_G03_I0014_T0F.flac`
 
 #### *The Lord of the Rings: The Third Age* (TODO)
 TODO
