@@ -281,7 +281,7 @@ Part 2: https://www.youtube.com/watch?v=6lgO9cQg5qM
 * **`e3c3f12.vid`:** TODO
 * **`e3c3f13.vid`:** TODO
 * **`e3c3f14.vid`:** TODO
-* **`logo.vid`:** TODO
+* **`logo.vid`:** https://youtu.be/a0ulVhokkgU?t=7
 
 # Translating VID1 Video into M4V (deprecated)
 Because the VID1 *video codec* is very similar to MPEG-4 ASP, my original idea was to *translate* the VID1 video stream into MPEG-4 ASP as an M4V file using [`vid1_to_m4v.py`](vid1_to_m4v.py):
