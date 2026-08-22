@@ -145,6 +145,7 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`pat1fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=29
     * `Data/Game/pat/pat01.scg/streamed/STREAM_G02_I0004_T0F.flac`
 * **`pat1fmv2.vid`:** https://youtu.be/JtgPV8jRLLg?t=866
+    * `Data/Game/pat/pat01.scg/streamed/STREAM_G02_I0006_T0F.flac`
 * **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
 * **`pelefmv1.vid`:** https://youtu.be/Fe0SuecJ7QQ?t=21
     * `Data/Game/pel/pel02.scg/streamed/STREAM_G03_I0000_T0F.flac`
