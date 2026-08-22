@@ -147,7 +147,8 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`pat1fmv2.vid`:** https://youtu.be/JtgPV8jRLLg?t=866
     * `Data/Game/pat/pat01.scg/streamed/STREAM_G02_I0006_T0F.flac`
 * **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
-    * `Data/Game/pat/pat02.scg/streamed/STREAM_G01_I0002_T0C.flac` - not sure (`pat2fmv1.vid` is just a 3 second black screen)
+    * Not sure (`pat2fmv1.vid` is just a 3 second black screen)
+    * `Data/Game/pat/pat02.scg/streamed/STREAM_G01_I0002_T0C.flac`
 * **`pelefmv1.vid`:** https://youtu.be/Fe0SuecJ7QQ?t=21
     * `Data/Game/pel/pel02.scg/streamed/STREAM_G03_I0000_T0F.flac`
 * **`shelfmv1.vid`:** https://youtu.be/Z_a3P4TS4lk?t=19
