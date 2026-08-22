@@ -152,14 +152,16 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
     * `Data/Game/she/she01.scg/streamed/STREAM_G03_I0014_T0F.flac`
 
 #### *The Lord of the Rings: The Third Age* (DOL-G3AE-USA)
-Part 1: https://www.youtube.com/watch?v=a0ulVhokkgU
 
-Part 2: https://www.youtube.com/watch?v=6lgO9cQg5qM
+* Part 1: https://www.youtube.com/watch?v=fQy1RELNIhs
+* Part 2: https://www.youtube.com/watch?v=CFsYvaNiMdo
+* Part 3: https://www.youtube.com/watch?v=bcbHMQnLFhk
+* Part 4: https://www.youtube.com/watch?v=biy_JAiWfJo
 
 ##### Disc 1
 
 * **`attrloop.vid`:** TODO
-* **`e1c1f01.vid`:** TODO
+* **`e1c1f01.vid`:** https://youtu.be/fQy1RELNIhs?t=78
 * **`e1c1f02.vid`:** TODO
 * **`e1c1f03.vid`:** TODO
 * **`e1c1f04.vid`:** TODO
@@ -210,7 +212,7 @@ Part 2: https://www.youtube.com/watch?v=6lgO9cQg5qM
 * **`e2c2f02.vid`:** TODO
 * **`e2c2f04.vid`:** TODO
 * **`e2c2f06.vid`:** TODO
-* **`logo.vid`:** https://youtu.be/a0ulVhokkgU?t=7
+* **`logo.vid`:** https://youtu.be/fQy1RELNIhs?t=4
 
 ##### Disc 2
 
@@ -281,7 +283,7 @@ Part 2: https://www.youtube.com/watch?v=6lgO9cQg5qM
 * **`e3c3f12.vid`:** TODO
 * **`e3c3f13.vid`:** TODO
 * **`e3c3f14.vid`:** TODO
-* **`logo.vid`:** https://youtu.be/a0ulVhokkgU?t=7
+* **`logo.vid`:** https://youtu.be/fQy1RELNIhs?t=4
 
 # Translating VID1 Video into M4V (deprecated)
 Because the VID1 *video codec* is very similar to MPEG-4 ASP, my original idea was to *translate* the VID1 video stream into MPEG-4 ASP as an M4V file using [`vid1_to_m4v.py`](vid1_to_m4v.py):
