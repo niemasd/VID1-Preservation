@@ -214,7 +214,74 @@ Part 2: https://www.youtube.com/watch?v=6lgO9cQg5qM
 
 ##### Disc 2
 
-* TODO
+* **`e2c2f03.vid`:** TODO
+* **`e2c2f05.vid`:** TODO
+* **`e2c2f07.vid`:** TODO
+* **`e2c2f08.vid`:** TODO
+* **`e2c3f00.vid`:** TODO
+* **`e2c3f01.vid`:** TODO
+* **`e2c3f02.vid`:** TODO
+* **`e2c3f04.vid`:** TODO
+* **`e2c3f05.vid`:** TODO
+* **`e2c3f06.vid`:** TODO
+* **`e2c3f07.vid`:** TODO
+* **`e2c3f08.vid`:** TODO
+* **`e2c4f01.vid`:** TODO
+* **`e2c4f02.vid`:** TODO
+* **`e2c4f03.vid`:** TODO
+* **`e2c4f04.vid`:** TODO
+* **`e2c4f05.vid`:** TODO
+* **`e2c4f06.vid`:** TODO
+* **`e2c5f01.vid`:** TODO
+* **`e2c5f02.vid`:** TODO
+* **`e2c5f03.vid`:** TODO
+* **`e2c5f04.vid`:** TODO
+* **`e2c5f05.vid`:** TODO
+* **`e2c5f06.vid`:** TODO
+* **`e2c5f07.vid`:** TODO
+* **`e2c5f08.vid`:** TODO
+* **`e2c5f09.vid`:** TODO
+* **`e2c5f10.vid`:** TODO
+* **`e2c5f11.vid`:** TODO
+* **`e3c1f01.vid`:** TODO
+* **`e3c1f02.vid`:** TODO
+* **`e3c1f03.vid`:** TODO
+* **`e3c1f04.vid`:** TODO
+* **`e3c1f05.vid`:** TODO
+* **`e3c1f06.vid`:** TODO
+* **`e3c1f07.vid`:** TODO
+* **`e3c1f08.vid`:** TODO
+* **`e3c1f09.vid`:** TODO
+* **`e3c1f10.vid`:** TODO
+* **`e3c1f11.vid`:** TODO
+* **`e3c1f12.vid`:** TODO
+* **`e3c1f13.vid`:** TODO
+* **`e3c1f14.vid`:** TODO
+* **`e3c2f01.vid`:** TODO
+* **`e3c2f02.vid`:** TODO
+* **`e3c2f03.vid`:** TODO
+* **`e3c2f04.vid`:** TODO
+* **`e3c2f05.vid`:** TODO
+* **`e3c2f06.vid`:** TODO
+* **`e3c2f07.vid`:** TODO
+* **`e3c2f08.vid`:** TODO
+* **`e3c2f09.vid`:** TODO
+* **`e3c2f10.vid`:** TODO
+* **`e3c3f01.vid`:** TODO
+* **`e3c3f02.vid`:** TODO
+* **`e3c3f03.vid`:** TODO
+* **`e3c3f04.vid`:** TODO
+* **`e3c3f05.vid`:** TODO
+* **`e3c3f06.vid`:** TODO
+* **`e3c3f07.vid`:** TODO
+* **`e3c3f08.vid`:** TODO
+* **`e3c3f09.vid`:** TODO
+* **`e3c3f10.vid`:** TODO
+* **`e3c3f11.vid`:** TODO
+* **`e3c3f12.vid`:** TODO
+* **`e3c3f13.vid`:** TODO
+* **`e3c3f14.vid`:** TODO
+* **`logo.vid`:** TODO
 
 # Translating VID1 Video into M4V (deprecated)
 Because the VID1 *video codec* is very similar to MPEG-4 ASP, my original idea was to *translate* the VID1 video stream into MPEG-4 ASP as an M4V file using [`vid1_to_m4v.py`](vid1_to_m4v.py):
