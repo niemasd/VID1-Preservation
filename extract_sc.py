@@ -3,47 +3,33 @@
 
 Usage:
 
-    python3 extract_audio.py fro03.scg
+    python3 extract_sc.py fro03.scg
+    python3 extract_sc.py e01c01.scg
 
-The script uses NiemaFS to expose an archive's logical resources.  It extracts
-both audio layouts observed in the GameCube SCG files:
+NiemaFS exposes each archive's logical resources.  This extractor handles:
 
-* ``.shdr`` + ``.samp`` sample banks, whose entries are written as individual
-  mono FLAC files.
-* Long, interleaved DSP streams stored in the archive's unindexed ``bulk``
-  area.  Their offsets, sizes, rates, and channel counts are read from either
-  the flat or grouped streaming-table layout in the matching ``.shdr``
-  metadata.
+* ``.shdr`` + ``.samp`` sample banks, including The Third Age's grouped
+  fixed-point playback-rate table.  When one encoded DSP entry is referenced
+  at multiple distinct rates, one FLAC is written for every verified playback
+  variant.
+* Long, interleaved DSP streams in an archive bulk area.
+* The Third Age's companion ``.sas`` streams when the installed NiemaFS
+  ``ScgFS`` exposes the same-stem SAS file under ``bulk/``.
 
-Stream names are recovered from ``RPNS`` resources.  When an IGC script binds a
-movie to a named audio event, the event is appended to the filename.  For
-example, stream 22 in the supplied archive becomes:
-
-    streamed/ATTRFMV1_Global_AttractLoop.flac
-
-RPNS class-4 movie references include a third numeric selector.  Only
-selector 255 has been verified to address the archive's type-0x0F movie-stream
-table.  Other selector values are retained in ``manifest.json`` but are not
-mapped to local stream records or used to rename outputs.  In particular, a
-selector such as 253 is not assumed to encode record type 0x0D.
-
-Decoded signed 16-bit PCM is piped directly to FFmpeg and encoded losslessly
-with FFmpeg's highest FLAC compression level plus exact Rice-parameter search.
-Bitexact muxing and zero metadata-header padding avoid per-file encoder tags
-and FFmpeg's normal reserved padding.  No intermediate WAV files or lossy
-re-encoding are used.
+Stream names are recovered from ``RPNS`` resources where a verified mapping is
+available.  Decoded signed 16-bit PCM is piped directly to FFmpeg and encoded
+losslessly as FLAC; no intermediate WAV files or lossy re-encoding are used.
 
 The input suffix selects the NiemaFS class automatically.  Both the established
-SCG/SCW/SCX spellings and the transposed SGC/SGW/SGX spellings are accepted:
+SCG/SCW/SCX spellings and transposed SGC/SGW/SGX spellings are accepted:
 
     .scg / .sgc -> ScgFS or SgcFS
     .scw / .sgw -> ScwFS or SgwFS
     .scx / .sgx -> ScxFS or SgxFS
 
-The DSP layouts implemented here are verified against GameCube SCG samples.
-For PC/Xbox containers, the script still dispatches to the correct filesystem
-class and will extract any compatible ``.shdr``/``.samp`` DSP data it finds,
-but it refuses malformed or incompatible audio rather than guessing a codec.
+The implemented DSP layouts are validated against GameCube SCG samples,
+including ``e01c01.scg``/``e01c01.sas`` from The Lord of the Rings: The Third
+Age.  Malformed or incompatible audio is rejected rather than guessed.
 """
 
 from __future__ import annotations
@@ -80,6 +66,24 @@ STREAM_GROUP_OFFSETS_OFFSET = 0x44
 STREAM_GROUP_DATA_OFFSET = 0x48
 STREAM_GROUP_DATA_SIZE_OFFSET = 0x4C
 STREAM_GROUP_END_OFFSET = 0x50
+THIRD_AGE_ARCHIVE_VARIANTS = frozenset({
+    "third-age-stoc-v2-swvr",
+    "third-age-stoc-swvr",
+})
+THIRD_AGE_SAMPLE_RATE_SCALE = 32_000
+# The low header also contains a different count at 0x24.  The actual number
+# of playback-group relative offsets is the later copy at 0x78; some character
+# banks have more playback groups than the earlier field reports.
+THIRD_AGE_SAMPLE_GROUP_COUNT_OFFSET = 0x78
+THIRD_AGE_SAMPLE_GROUP_OFFSETS_OFFSET = 0x28
+THIRD_AGE_SAMPLE_GROUP_DATA_OFFSET = 0x2C
+THIRD_AGE_SAMPLE_GROUP_DATA_SIZE_OFFSET = 0x30
+THIRD_AGE_SAMPLE_GROUP_END_OFFSET = 0x34
+THIRD_AGE_STREAM_GROUP_COUNT_OFFSET = 0x38
+THIRD_AGE_STREAM_GROUP_OFFSETS_OFFSET = 0x3C
+THIRD_AGE_STREAM_GROUP_DATA_OFFSET = 0x40
+THIRD_AGE_STREAM_GROUP_DATA_SIZE_OFFSET = 0x44
+THIRD_AGE_STREAM_GROUP_END_OFFSET = 0x48
 # RPNS class 4 names movie-related resources.  In the supplied ``fro03``
 # archive, selector 255 directly addresses the type-0x0F movie-stream table.
 # No meaning has been verified for other selector values, so they must not be
@@ -89,7 +93,8 @@ RPNS_VERIFIED_LOCAL_SELECTOR = 255
 RPNS_STANDARD_STREAM_RECORD_TYPE = 0x0F
 MAX_REASONABLE_SAMPLE_ENTRIES = 1_000_000
 MAX_REASONABLE_STREAM_ENTRIES = 100_000
-MIN_REASONABLE_SAMPLE_RATE = 4_000
+# The Third Age deliberately uses a few very low fixed-point playback rates.
+MIN_REASONABLE_SAMPLE_RATE = 1_000
 MAX_REASONABLE_SAMPLE_RATE = 384_000
 FLAC_COMPRESSION_LEVEL = 12
 FLAC_EXACT_RICE_PARAMETERS = True
@@ -162,6 +167,29 @@ class DspEntry:
 
 
 @dataclass(frozen=True)
+class SampleRateReference:
+    """One Third Age playback-table reference to a low-level DSP entry."""
+
+    group_index: int
+    group_entry_index: int
+    group_type: int
+    fixed_rate: int
+    sample_rate: int
+    unknown_04: int
+    dsp_entry_index: int
+
+
+@dataclass(frozen=True)
+class SampleRateVariant:
+    """One playback rate at which a low-level DSP entry should be exported."""
+
+    sample_rate: int
+    source: str
+    inferred: bool
+    references: tuple[SampleRateReference, ...] = ()
+
+
+@dataclass(frozen=True)
 class ParsedSampleShdr:
     """Relevant information recovered from a .shdr sample-bank table."""
 
@@ -174,6 +202,9 @@ class ParsedSampleShdr:
     entries: tuple[DspEntry, ...]
     rate_values: tuple[int, ...]
     rate_source: str
+    rate_layout: str | None = None
+    rate_references: tuple[SampleRateReference, ...] = ()
+    rate_candidates_by_entry: tuple[tuple[int, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -215,6 +246,8 @@ class StreamAudioEntry:
     group_index: int | None = None
     group_entry_index: int | None = None
     record_type: int | None = None
+    sample_rate_raw: int | None = None
+    sample_rate_encoding: str | None = None
 
 
 @dataclass(frozen=True)
@@ -252,10 +285,10 @@ class ParsedStreamTable:
 
 @dataclass(frozen=True)
 class LoadedArchive:
-    """NiemaFS output and the metadata needed by the audio extractors."""
+    """Logical resources and metadata needed by the audio extractors."""
 
     files: dict[Path, bytes]
-    fs: object
+    fs: object | None
     fs_class_name: str
     canonical_format: str
     archive_format: str | None
@@ -263,6 +296,7 @@ class LoadedArchive:
     byte_order: str | None
     bulk_offset: int | None
     bulk_size: int | None
+    bulk_source_path: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +347,7 @@ def _resolve_filesystem_class(target_path: Path) -> tuple[type, str]:
 
 
 def load_archive(target_path: Path) -> LoadedArchive:
-    """Read all NiemaFS-exposed files, including the SCG/SCW bulk tail."""
+    """Read all NiemaFS-exposed files, including bulk or companion SAS data."""
 
     fs_class, canonical_format = _resolve_filesystem_class(target_path)
     with target_path.open("rb") as target_file:
@@ -345,6 +379,10 @@ def load_archive(target_path: Path) -> LoadedArchive:
             if data is not None
         }
 
+        companion_bulk_path = getattr(fs, "companion_bulk_path", None)
+        if companion_bulk_path is not None:
+            companion_bulk_path = Path(companion_bulk_path)
+
         return LoadedArchive(
             files=files,
             fs=fs,
@@ -355,6 +393,7 @@ def load_archive(target_path: Path) -> LoadedArchive:
             byte_order=getattr(fs, "byte_order", None),
             bulk_offset=getattr(fs, "bulk_offset", None),
             bulk_size=getattr(fs, "bulk_size", None),
+            bulk_source_path=companion_bulk_path,
         )
 
 
@@ -493,6 +532,136 @@ def _candidate_entry_strides(
     return list(dict.fromkeys(candidates))
 
 
+def _third_age_fixed_rate_to_hz(value: int) -> int:
+    """Convert The Third Age's 16.16 rate multiplier to integer hertz."""
+
+    return (value * THIRD_AGE_SAMPLE_RATE_SCALE + 0x8000) // 0x10000
+
+
+def _parse_third_age_sample_rate_table(
+    data: bytes,
+    endian: str,
+    entry_count: int,
+    entry_stride: int,
+) -> tuple[
+    tuple[SampleRateReference, ...],
+    tuple[tuple[int, ...], ...],
+] | None:
+    """Parse the grouped fixed-point playback table used by The Third Age.
+
+    The table may contain repeated references to one DSP entry and may assign
+    more than one playback rate to the same encoded sound.  Both cases are
+    retained so extraction can deduplicate exact repeats while preserving real
+    pitch variants.
+    """
+
+    header_end = max(
+        THIRD_AGE_SAMPLE_GROUP_COUNT_OFFSET,
+        THIRD_AGE_SAMPLE_GROUP_END_OFFSET,
+    ) + 4
+    if len(data) < header_end:
+        return None
+
+    try:
+        group_count = unpack_from(
+            endian + "I", data, THIRD_AGE_SAMPLE_GROUP_COUNT_OFFSET
+        )[0]
+        offsets_offset = unpack_from(
+            endian + "I", data, THIRD_AGE_SAMPLE_GROUP_OFFSETS_OFFSET
+        )[0]
+        group_data_offset = unpack_from(
+            endian + "I", data, THIRD_AGE_SAMPLE_GROUP_DATA_OFFSET
+        )[0]
+        group_data_size = unpack_from(
+            endian + "I", data, THIRD_AGE_SAMPLE_GROUP_DATA_SIZE_OFFSET
+        )[0]
+        group_end_offset = unpack_from(
+            endian + "I", data, THIRD_AGE_SAMPLE_GROUP_END_OFFSET
+        )[0]
+    except Exception:
+        return None
+
+    if not 1 <= group_count <= 0x1000:
+        return None
+    offsets_size = group_count * 4
+    if not 0 <= offsets_offset <= len(data) - offsets_size:
+        return None
+    if group_data_offset != offsets_offset + offsets_size:
+        return None
+    if group_end_offset != group_data_offset + group_data_size:
+        return None
+    if not group_data_offset <= group_end_offset <= len(data):
+        return None
+
+    relative_offsets = unpack_from(
+        endian + f"{group_count}I", data, offsets_offset
+    )
+    if not relative_offsets or relative_offsets[0] != 0:
+        return None
+    if any(
+        next_offset <= offset
+        for offset, next_offset in zip(relative_offsets, relative_offsets[1:])
+    ):
+        return None
+    if relative_offsets[-1] >= group_data_size:
+        return None
+
+    references: list[SampleRateReference] = []
+    candidates: list[list[int]] = [[] for _ in range(entry_count)]
+
+    for group_index, relative_offset in enumerate(relative_offsets):
+        start = group_data_offset + relative_offset
+        next_relative = (
+            relative_offsets[group_index + 1]
+            if group_index + 1 < group_count
+            else group_data_size
+        )
+        limit = group_data_offset + next_relative
+        if start + 4 > limit:
+            return None
+
+        record_count, group_type = unpack_from(endian + "2H", data, start)
+        required_size = 4 + record_count * 0x0C
+        if required_size != limit - start:
+            return None
+
+        for group_entry_index in range(record_count):
+            record_offset = start + 4 + group_entry_index * 0x0C
+            fixed_rate, unknown_04, dsp_relative_offset = unpack_from(
+                endian + "3I", data, record_offset
+            )
+            if dsp_relative_offset % entry_stride:
+                return None
+            dsp_entry_index = dsp_relative_offset // entry_stride
+            if not 0 <= dsp_entry_index < entry_count:
+                return None
+
+            sample_rate = _third_age_fixed_rate_to_hz(fixed_rate)
+            if not (
+                MIN_REASONABLE_SAMPLE_RATE
+                <= sample_rate
+                <= MAX_REASONABLE_SAMPLE_RATE
+            ):
+                return None
+
+            reference = SampleRateReference(
+                group_index=group_index,
+                group_entry_index=group_entry_index,
+                group_type=group_type,
+                fixed_rate=fixed_rate,
+                sample_rate=sample_rate,
+                unknown_04=unknown_04,
+                dsp_entry_index=dsp_entry_index,
+            )
+            references.append(reference)
+            if sample_rate not in candidates[dsp_entry_index]:
+                candidates[dsp_entry_index].append(sample_rate)
+
+    if not references:
+        return None
+    return tuple(references), tuple(tuple(values) for values in candidates)
+
+
 def _extract_rate_values(data: bytes, endian: str) -> tuple[list[int], str]:
     """Recover plausible sample rates from the structured .shdr sections."""
 
@@ -628,7 +797,26 @@ def _parse_sample_shdr_with_endian(
         )
         previous_start = start
 
-    rate_values, rate_source = _extract_rate_values(shdr_data, endian)
+    third_age_rates = _parse_third_age_sample_rate_table(
+        shdr_data,
+        endian=endian,
+        entry_count=count,
+        entry_stride=stride,
+    )
+    if third_age_rates is not None:
+        rate_references, rate_candidates_by_entry = third_age_rates
+        rate_values = [reference.sample_rate for reference in rate_references]
+        rate_source = (
+            "Third Age grouped fixed-point playback table "
+            "(16.16 multiplier x 32000 Hz)"
+        )
+        rate_layout = "third-age-grouped-fixed-point"
+    else:
+        rate_references = ()
+        rate_candidates_by_entry = ()
+        rate_values, rate_source = _extract_rate_values(shdr_data, endian)
+        rate_layout = None
+
     return ParsedSampleShdr(
         byte_order="big" if endian == ">" else "little",
         endian=endian,
@@ -639,6 +827,9 @@ def _parse_sample_shdr_with_endian(
         entries=tuple(entries),
         rate_values=tuple(rate_values),
         rate_source=rate_source,
+        rate_layout=rate_layout,
+        rate_references=tuple(rate_references),
+        rate_candidates_by_entry=tuple(rate_candidates_by_entry),
     )
 
 
@@ -711,6 +902,175 @@ def choose_sample_rates(
         "the .shdr contains multiple rates but no verified mapping to its "
         f"{parsed.entry_count} DSP entries ({summary}); use --sample-rate RATE"
     )
+
+
+def _format_index_ranges(indices: Sequence[int]) -> str:
+    """Format sorted integer indices as compact inclusive ranges."""
+
+    if not indices:
+        return ""
+    ranges: list[str] = []
+    start = previous = indices[0]
+    for value in indices[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(ranges)
+
+
+def choose_sample_rate_variants(
+    parsed: ParsedSampleShdr,
+    override: int | None,
+) -> tuple[list[tuple[SampleRateVariant, ...]], str, list[str]]:
+    """Choose every verified playback-rate variant for each DSP entry."""
+
+    if override is not None:
+        rates, source = choose_sample_rates(parsed, override)
+        return (
+            [
+                (
+                    SampleRateVariant(
+                        sample_rate=sample_rate,
+                        source=source,
+                        inferred=False,
+                    ),
+                )
+                for sample_rate in rates
+            ],
+            source,
+            [],
+        )
+
+    if not parsed.rate_candidates_by_entry:
+        rates, source = choose_sample_rates(parsed, None)
+        return (
+            [
+                (
+                    SampleRateVariant(
+                        sample_rate=sample_rate,
+                        source=source,
+                        inferred=False,
+                    ),
+                )
+                for sample_rate in rates
+            ],
+            source,
+            [],
+        )
+
+    references_by_entry_and_rate: defaultdict[
+        tuple[int, int], list[SampleRateReference]
+    ] = defaultdict(list)
+    for reference in parsed.rate_references:
+        references_by_entry_and_rate[
+            (reference.dsp_entry_index, reference.sample_rate)
+        ].append(reference)
+
+    direct_candidates = [list(values) for values in parsed.rate_candidates_by_entry]
+    if len(direct_candidates) != parsed.entry_count:
+        raise ShdrFormatError(
+            "Third Age rate map does not have one candidate slot per DSP entry"
+        )
+
+    modal_counts: Counter[int] = Counter()
+    for candidates in direct_candidates:
+        for sample_rate in candidates:
+            modal_counts[sample_rate] += 1
+    if not modal_counts:
+        raise ShdrFormatError("Third Age playback table contains no mapped rates")
+    modal_rate = min(
+        modal_counts,
+        key=lambda sample_rate: (-modal_counts[sample_rate], sample_rate),
+    )
+
+    warnings: list[str] = []
+    missing_indices = [
+        index for index, candidates in enumerate(direct_candidates) if not candidates
+    ]
+    multiple_indices = [
+        index
+        for index, candidates in enumerate(direct_candidates)
+        if len(candidates) > 1
+    ]
+
+    variants_by_entry: list[tuple[SampleRateVariant, ...]] = []
+    for entry_index, candidates in enumerate(direct_candidates):
+        if candidates:
+            variants_by_entry.append(
+                tuple(
+                    SampleRateVariant(
+                        sample_rate=sample_rate,
+                        source="direct Third Age playback-table reference",
+                        inferred=False,
+                        references=tuple(
+                            references_by_entry_and_rate[
+                                (entry_index, sample_rate)
+                            ]
+                        ),
+                    )
+                    for sample_rate in candidates
+                )
+            )
+            continue
+
+        left: tuple[int, int] | None = None
+        for candidate_index in range(entry_index - 1, -1, -1):
+            if len(direct_candidates[candidate_index]) == 1:
+                left = (
+                    entry_index - candidate_index,
+                    direct_candidates[candidate_index][0],
+                )
+                break
+
+        right: tuple[int, int] | None = None
+        for candidate_index in range(entry_index + 1, parsed.entry_count):
+            if len(direct_candidates[candidate_index]) == 1:
+                right = (
+                    candidate_index - entry_index,
+                    direct_candidates[candidate_index][0],
+                )
+                break
+
+        if left is not None and right is not None and left[1] == right[1]:
+            inferred_rate = left[1]
+            inference_source = "inferred from matching neighboring DSP entries"
+        elif left is not None and (right is None or left[0] < right[0]):
+            inferred_rate = left[1]
+            inference_source = "inferred from nearest mapped DSP entry"
+        elif right is not None and (left is None or right[0] < left[0]):
+            inferred_rate = right[1]
+            inference_source = "inferred from nearest mapped DSP entry"
+        else:
+            inferred_rate = modal_rate
+            inference_source = "inferred from the bank's modal mapped rate"
+
+        variants_by_entry.append(
+            (
+                SampleRateVariant(
+                    sample_rate=inferred_rate,
+                    source=inference_source,
+                    inferred=True,
+                ),
+            )
+        )
+
+    if missing_indices:
+        warnings.append(
+            f"{len(missing_indices)} DSP entries have no direct Third Age "
+            "playback-rate record; inferred rates for entries "
+            f"{_format_index_ranges(missing_indices)}"
+        )
+    if multiple_indices:
+        warnings.append(
+            f"{len(multiple_indices)} DSP entries have multiple distinct "
+            "playback rates; wrote one FLAC for each rate at entries "
+            f"{_format_index_ranges(multiple_indices)}"
+        )
+
+    return variants_by_entry, parsed.rate_source, warnings
 
 
 def _decode_dsp_frames(encoded: bytes, coefficients: Sequence[int]) -> array:
@@ -1305,6 +1665,285 @@ def _parse_grouped_stream_table(
     )
 
 
+def _parse_third_age_grouped_stream_table(
+    data: bytes,
+    source_path: Path,
+    endian: str,
+    bulk_size: int,
+) -> ParsedStreamTable:
+    """Parse The Third Age's grouped index into its companion ``.sas`` file."""
+
+    header_end = THIRD_AGE_STREAM_GROUP_END_OFFSET + 4
+    if len(data) < header_end:
+        raise StreamTableError(
+            ".shdr is too small for Third Age stream-group pointers"
+        )
+
+    group_count = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_COUNT_OFFSET
+    )[0]
+    offsets_offset = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_OFFSETS_OFFSET
+    )[0]
+    group_data_offset = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_DATA_OFFSET
+    )[0]
+    group_data_size = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_DATA_SIZE_OFFSET
+    )[0]
+    group_end_offset = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_END_OFFSET
+    )[0]
+
+    if not 1 <= group_count <= 0x1000:
+        raise StreamTableError(
+            f"implausible Third Age stream-group count: {group_count}"
+        )
+    offsets_size = group_count * 4
+    if not 0 <= offsets_offset <= len(data) - offsets_size:
+        raise StreamTableError("Third Age group-offset array is outside the .shdr")
+    if group_data_offset != offsets_offset + offsets_size:
+        raise StreamTableError(
+            "Third Age group data does not immediately follow its offset array"
+        )
+    if group_end_offset != group_data_offset + group_data_size:
+        raise StreamTableError(
+            "Third Age group data size and end pointer disagree"
+        )
+    if not group_data_offset <= group_end_offset <= len(data):
+        raise StreamTableError("Third Age group data area is outside the .shdr")
+
+    relative_offsets = list(
+        unpack_from(endian + f"{group_count}I", data, offsets_offset)
+    )
+    if not relative_offsets or relative_offsets[0] != 0:
+        raise StreamTableError(
+            "first Third Age stream-group relative offset is not zero"
+        )
+    if any(
+        next_offset <= offset
+        for offset, next_offset in zip(relative_offsets, relative_offsets[1:])
+    ):
+        raise StreamTableError(
+            "Third Age stream-group relative offsets are not strictly increasing"
+        )
+    if relative_offsets[-1] >= group_data_size:
+        raise StreamTableError(
+            "last Third Age stream-group offset is outside group data"
+        )
+
+    groups: list[StreamGroup] = []
+    entries: list[StreamAudioEntry] = []
+    previous_end: int | None = None
+    contiguous = 0
+    global_index = 0
+
+    for group_index, relative_offset in enumerate(relative_offsets):
+        start = group_data_offset + relative_offset
+        next_relative = (
+            relative_offsets[group_index + 1]
+            if group_index + 1 < group_count
+            else group_data_size
+        )
+        limit = group_data_offset + next_relative
+        if start + 4 > limit:
+            raise StreamTableError(
+                f"Third Age stream group {group_index} is smaller than its header"
+            )
+
+        record_count, record_type = unpack_from(endian + "2H", data, start)
+        if record_count > MAX_REASONABLE_STREAM_ENTRIES:
+            raise StreamTableError(
+                f"Third Age stream group {group_index} has implausible record "
+                f"count {record_count}"
+            )
+        required_size = 4 + record_count * STREAM_RECORD_OBSERVED_SIZE
+        available_size = limit - start
+        if required_size != available_size:
+            raise StreamTableError(
+                f"Third Age stream group {group_index} occupies "
+                f"0x{available_size:X} bytes, but its {record_count} records "
+                f"require 0x{required_size:X}"
+            )
+
+        groups.append(
+            StreamGroup(
+                index=group_index,
+                relative_offset=relative_offset,
+                data_offset=start,
+                record_count=record_count,
+                record_type=record_type,
+            )
+        )
+
+        records_offset = start + 4
+        for group_entry_index in range(record_count):
+            offset = records_offset + group_entry_index * STREAM_RECORD_OBSERVED_SIZE
+            raw_record = data[offset : offset + STREAM_RECORD_OBSERVED_SIZE]
+            (
+                fixed_rate,
+                unknown_04,
+                bulk_offset,
+                stored_size,
+            ) = unpack_from(endian + "4I", raw_record, 0)
+            field_10, block_count, flags = unpack_from(
+                endian + "3H", raw_record, 0x10
+            )
+            channels = raw_record[0x16]
+            field_17 = raw_record[0x17]
+            sample_rate = _third_age_fixed_rate_to_hz(fixed_rate)
+
+            if not (
+                MIN_REASONABLE_SAMPLE_RATE
+                <= sample_rate
+                <= MAX_REASONABLE_SAMPLE_RATE
+            ):
+                raise StreamTableError(
+                    f"Third Age group {group_index} entry {group_entry_index} "
+                    f"has implausible fixed-point rate 0x{fixed_rate:X} "
+                    f"({sample_rate} Hz)"
+                )
+            if not 1 <= channels <= 8:
+                raise StreamTableError(
+                    f"Third Age group {group_index} entry {group_entry_index} "
+                    f"has implausible channel count {channels}"
+                )
+            if block_count == 0:
+                raise StreamTableError(
+                    f"Third Age group {group_index} entry {group_entry_index} "
+                    "has zero blocks"
+                )
+            if not 0 <= field_10 < STREAM_BLOCK_SIZE:
+                raise StreamTableError(
+                    f"Third Age group {group_index} entry {group_entry_index} "
+                    f"has invalid final-block padding 0x{field_10:X}"
+                )
+
+            final_block_size = STREAM_BLOCK_SIZE - field_10
+            if final_block_size < STREAM_BLOCK_HEADER_SIZE:
+                raise StreamTableError(
+                    f"Third Age group {group_index} entry {group_entry_index} "
+                    f"has final physical block size 0x{final_block_size:X}"
+                )
+            expected_size = channels * (
+                (block_count - 1) * STREAM_BLOCK_SIZE + final_block_size
+            )
+            if stored_size != expected_size:
+                raise StreamTableError(
+                    f"Third Age group {group_index} entry {group_entry_index} "
+                    f"stores 0x{stored_size:X} bytes, but its block geometry "
+                    f"requires 0x{expected_size:X}"
+                )
+            if bulk_offset + stored_size > bulk_size:
+                raise StreamTableError(
+                    f"Third Age group {group_index} entry {group_entry_index} "
+                    f"points to SAS range 0x{bulk_offset:X}.."
+                    f"0x{bulk_offset + stored_size:X}, beyond 0x{bulk_size:X}"
+                )
+            if previous_end is not None:
+                if bulk_offset < previous_end:
+                    raise StreamTableError(
+                        "Third Age SAS stream ranges overlap or are out of order"
+                    )
+                if bulk_offset == previous_end:
+                    contiguous += 1
+            previous_end = bulk_offset + stored_size
+
+            entries.append(
+                StreamAudioEntry(
+                    index=global_index,
+                    sample_rate=sample_rate,
+                    unknown_04=unknown_04,
+                    bulk_offset=bulk_offset,
+                    stored_size=stored_size,
+                    field_10=field_10,
+                    block_count=block_count,
+                    flags=flags,
+                    channels=channels,
+                    field_17=field_17,
+                    raw_record=raw_record,
+                    group_index=group_index,
+                    group_entry_index=group_entry_index,
+                    record_type=record_type,
+                    sample_rate_raw=fixed_rate,
+                    sample_rate_encoding="16.16 multiplier x 32000 Hz",
+                )
+            )
+            global_index += 1
+
+    if not entries:
+        raise StreamTableError("Third Age grouped stream catalog has no records")
+
+    score = len(entries) * 40 + contiguous * 5 + min(group_count, 64) * 2
+    if entries[0].bulk_offset == 0:
+        score += 25
+    if entries[-1].bulk_offset + entries[-1].stored_size <= bulk_size:
+        score += 25
+
+    return ParsedStreamTable(
+        source_path=source_path,
+        byte_order="big" if endian == ">" else "little",
+        endian=endian,
+        section_offset=offsets_offset,
+        section_size=group_end_offset - offsets_offset,
+        descriptor=None,
+        record_stride=STREAM_RECORD_OBSERVED_SIZE,
+        record_type=None,
+        entries=tuple(entries),
+        score=score,
+        layout="third-age-grouped",
+        groups=tuple(groups),
+        group_offset_table_offset=offsets_offset,
+        group_data_offset=group_data_offset,
+        group_data_size=group_data_size,
+        group_end_offset=group_end_offset,
+    )
+
+
+def find_third_age_stream_table(
+    files: Mapping[Path, bytes],
+    bulk_size: int,
+    preferred_endian: str | None,
+) -> ParsedStreamTable:
+    """Find the validated Third Age SAS index in the embedded ``.shdr`` files."""
+
+    endian_order = [preferred_endian] if preferred_endian in {">", "<"} else []
+    endian_order.extend(endian for endian in (">", "<") if endian not in endian_order)
+
+    candidates: list[ParsedStreamTable] = []
+    errors: list[str] = []
+    for path, data in files.items():
+        if _logical_extension(path) != ".shdr":
+            continue
+        for endian in endian_order:
+            try:
+                candidates.append(
+                    _parse_third_age_grouped_stream_table(
+                        data=data,
+                        source_path=path,
+                        endian=endian,
+                        bulk_size=bulk_size,
+                    )
+                )
+            except StreamTableError as error:
+                errors.append(f"{path.as_posix()}: {error}")
+
+    if not candidates:
+        detail = errors[-1] if errors else "no .shdr resources were present"
+        raise StreamTableError(
+            f"no valid Third Age SAS stream table found ({detail})"
+        )
+    candidates.sort(key=lambda table: table.score, reverse=True)
+    if len(candidates) > 1 and candidates[1].score == candidates[0].score:
+        first, second = candidates[:2]
+        if first.source_path != second.source_path or first.endian != second.endian:
+            raise StreamTableError(
+                "multiple Third Age SAS stream tables have equal confidence: "
+                f"{first.source_path} and {second.source_path}"
+            )
+    return candidates[0]
+
+
 def find_stream_table(
     files: Mapping[Path, bytes],
     bulk_size: int,
@@ -1495,6 +2134,143 @@ def decode_streamed_dsp(
         channel_partial_bytes,
         padded_samples,
     )
+
+
+def decode_third_age_streamed_dsp(
+    bulk_data: bytes,
+    entry: StreamAudioEntry,
+    coefficient_endian: str,
+) -> tuple[array, list[int], int, int]:
+    """Decode one Third Age SAS stream with packed final channel blocks.
+
+    Every channel has ``block_count`` physical blocks.  Full blocks are
+    0x8000 bytes, while the final block for each channel is shortened by
+    ``field_10`` bytes.  Physical blocks are interleaved by channel, and each
+    one carries a 0x100-byte coefficient/header prefix.
+    """
+
+    if entry.channels not in {1, 2}:
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} uses unsupported channel count "
+            f"{entry.channels}; only mono and stereo DSP streams are known"
+        )
+    if entry.block_count <= 0:
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} has no physical blocks"
+        )
+    if not 0 <= entry.field_10 < STREAM_BLOCK_SIZE:
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} has invalid final-block padding "
+            f"0x{entry.field_10:X}"
+        )
+
+    final_block_size = STREAM_BLOCK_SIZE - entry.field_10
+    if final_block_size < STREAM_BLOCK_HEADER_SIZE:
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} has final physical block size "
+            f"0x{final_block_size:X}, smaller than its header"
+        )
+    expected_size = entry.channels * (
+        (entry.block_count - 1) * STREAM_BLOCK_SIZE + final_block_size
+    )
+    if entry.stored_size != expected_size:
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} stores 0x{entry.stored_size:X} "
+            f"bytes, but its block geometry requires 0x{expected_size:X}"
+        )
+
+    start = entry.bulk_offset
+    end = start + entry.stored_size
+    if start < 0 or end > len(bulk_data):
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} needs SAS range "
+            f"0x{start:X}..0x{end:X}, outside 0x{len(bulk_data):X} bytes"
+        )
+    region = bulk_data[start:end]
+    if not any(region):
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} is entirely zero-filled"
+        )
+
+    coefficient_sets: list[tuple[int, ...] | None] = [
+        None for _ in range(entry.channels)
+    ]
+    payload_parts: list[list[bytes]] = [[] for _ in range(entry.channels)]
+    position = 0
+
+    for block_index in range(entry.block_count):
+        physical_size = (
+            final_block_size
+            if block_index == entry.block_count - 1
+            else STREAM_BLOCK_SIZE
+        )
+        for channel in range(entry.channels):
+            chunk_end = position + physical_size
+            if chunk_end > len(region):
+                raise DspDecodeError(
+                    f"Third Age stream {entry.index} channel {channel} block "
+                    f"{block_index} is truncated"
+                )
+            chunk = region[position:chunk_end]
+            position = chunk_end
+
+            coefficients = tuple(
+                unpack_from(coefficient_endian + "16h", chunk, 0)
+            )
+            if coefficient_sets[channel] is None:
+                coefficient_sets[channel] = coefficients
+            elif coefficient_sets[channel] != coefficients:
+                raise DspDecodeError(
+                    f"Third Age stream {entry.index} channel {channel} changes "
+                    f"DSP coefficients at block {block_index}"
+                )
+
+            payload = chunk[STREAM_BLOCK_HEADER_SIZE:]
+            if len(payload) % 8:
+                raise DspDecodeError(
+                    f"Third Age stream {entry.index} channel {channel} block "
+                    f"{block_index} has a 0x{len(payload):X}-byte DSP payload"
+                )
+            payload_parts[channel].append(payload)
+
+    if position != len(region):
+        raise DspDecodeError(
+            f"Third Age stream {entry.index} consumed 0x{position:X} of "
+            f"0x{len(region):X} stored bytes"
+        )
+
+    channels_pcm: list[array] = []
+    channel_sample_counts: list[int] = []
+    for channel in range(entry.channels):
+        coefficients = coefficient_sets[channel]
+        if coefficients is None:
+            raise DspDecodeError(
+                f"Third Age stream {entry.index} channel {channel} has no header"
+            )
+        payload = b"".join(payload_parts[channel])
+        if not payload:
+            raise DspDecodeError(
+                f"Third Age stream {entry.index} channel {channel} has no DSP data"
+            )
+        pcm = _decode_dsp_frames(payload, coefficients)
+        channels_pcm.append(pcm)
+        channel_sample_counts.append(len(pcm))
+
+    max_samples = max(channel_sample_counts)
+    padded_samples = sum(max_samples - count for count in channel_sample_counts)
+    if entry.channels == 1:
+        interleaved = channels_pcm[0]
+    else:
+        interleaved = array("h", [0]) * (max_samples * entry.channels)
+        for channel, pcm in enumerate(channels_pcm):
+            if len(pcm) < max_samples:
+                padded = array("h", pcm)
+                padded.extend([0] * (max_samples - len(pcm)))
+            else:
+                padded = pcm
+            interleaved[channel::entry.channels] = padded
+
+    return interleaved, channel_sample_counts, padded_samples, final_block_size
 
 
 # ---------------------------------------------------------------------------
@@ -1987,9 +2763,11 @@ def extract_sample_pair(
         pair.samp_data,
         preferred_endian=preferred_endian,
     )
-    rates, rate_mapping_source = choose_sample_rates(parsed, forced_sample_rate)
+    variants_by_entry, rate_mapping_source, rate_warnings = (
+        choose_sample_rate_variants(parsed, forced_sample_rate)
+    )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(rate_warnings)
     if parsed.declared_samp_size not in (0, len(pair.samp_data)):
         warnings.append(
             f"{pair.shdr_path.as_posix()} declares a .samp size of "
@@ -2004,45 +2782,71 @@ def extract_sample_pair(
     )
     sample_manifest: list[dict[str, object]] = []
 
-    for entry, sample_rate in tqdm(zip(parsed.entries, rates)):
+    for entry, variants in tqdm(
+        zip(parsed.entries, variants_by_entry),
+        total=parsed.entry_count,
+    ):
         decoded = decode_dsp_entry(pair.samp_data, entry)
-        output_name = (
-            f"sample_{entry.index:04d}_start{entry.start_address:08x}.flac"
-        )
-        output_path = bank_directory / output_name
-        write_flac(
-            output_path,
-            decoded.pcm,
-            sample_rate,
-            channels=1,
-            ffmpeg=ffmpeg,
-        )
+        for variant_index, variant in enumerate(variants):
+            stem = f"sample_{entry.index:04d}_start{entry.start_address:08x}"
+            if len(variants) > 1:
+                stem += f"_rate{variant.sample_rate}"
+            output_path = bank_directory / (stem + ".flac")
+            write_flac(
+                output_path,
+                decoded.pcm,
+                variant.sample_rate,
+                channels=1,
+                ffmpeg=ffmpeg,
+            )
 
-        sample_manifest.append(
-            {
-                "index": entry.index,
-                "output_path": output_path.relative_to(output_root).as_posix(),
-                "sample_rate": sample_rate,
-                "channels": 1,
-                "sample_format": "signed 16-bit PCM",
-                "decoded_samples": decoded.sample_count,
-                "duration_seconds": round(decoded.sample_count / sample_rate, 9),
-                "start_nibble_address": entry.start_address,
-                "start_nibble_address_hex": f"0x{entry.start_address:X}",
-                "loop_nibble_address": entry.loop_address,
-                "loop_nibble_address_hex": f"0x{entry.loop_address:X}",
-                "end_nibble_address_inclusive": entry.end_address,
-                "end_nibble_address_inclusive_hex": f"0x{entry.end_address:X}",
-                "current_nibble_address": entry.current_address,
-                "current_nibble_address_hex": f"0x{entry.current_address:X}",
-                "loop_start_sample": decoded.loop_start_sample,
-                "encoded_byte_offset": decoded.encoded_byte_offset,
-                "encoded_byte_offset_hex": f"0x{decoded.encoded_byte_offset:X}",
-                "encoded_byte_size": decoded.encoded_byte_size,
-                "coefficients": list(entry.coefficients),
-                "trailer_words": list(entry.trailer_words),
-            }
-        )
+            sample_manifest.append(
+                {
+                    "index": entry.index,
+                    "playback_variant_index": variant_index,
+                    "playback_variant_count": len(variants),
+                    "output_path": output_path.relative_to(output_root).as_posix(),
+                    "sample_rate": variant.sample_rate,
+                    "sample_rate_source": variant.source,
+                    "sample_rate_inferred": variant.inferred,
+                    "sample_rate_fixed_values": sorted(
+                        {reference.fixed_rate for reference in variant.references}
+                    ),
+                    "sample_rate_references": [
+                        {
+                            "group_index": reference.group_index,
+                            "group_entry_index": reference.group_entry_index,
+                            "group_type": reference.group_type,
+                            "group_type_hex": f"0x{reference.group_type:X}",
+                            "fixed_rate": reference.fixed_rate,
+                            "fixed_rate_hex": f"0x{reference.fixed_rate:X}",
+                            "unknown_04": reference.unknown_04,
+                        }
+                        for reference in variant.references
+                    ],
+                    "channels": 1,
+                    "sample_format": "signed 16-bit PCM",
+                    "decoded_samples": decoded.sample_count,
+                    "duration_seconds": round(
+                        decoded.sample_count / variant.sample_rate,
+                        9,
+                    ),
+                    "start_nibble_address": entry.start_address,
+                    "start_nibble_address_hex": f"0x{entry.start_address:X}",
+                    "loop_nibble_address": entry.loop_address,
+                    "loop_nibble_address_hex": f"0x{entry.loop_address:X}",
+                    "end_nibble_address_inclusive": entry.end_address,
+                    "end_nibble_address_inclusive_hex": f"0x{entry.end_address:X}",
+                    "current_nibble_address": entry.current_address,
+                    "current_nibble_address_hex": f"0x{entry.current_address:X}",
+                    "loop_start_sample": decoded.loop_start_sample,
+                    "encoded_byte_offset": decoded.encoded_byte_offset,
+                    "encoded_byte_offset_hex": f"0x{decoded.encoded_byte_offset:X}",
+                    "encoded_byte_size": decoded.encoded_byte_size,
+                    "coefficients": list(entry.coefficients),
+                    "trailer_words": list(entry.trailer_words),
+                }
+            )
 
     return (
         {
@@ -2052,12 +2856,15 @@ def extract_sample_pair(
             "declared_samp_size": parsed.declared_samp_size,
             "shdr_byte_order": parsed.byte_order,
             "entry_count": parsed.entry_count,
+            "output_file_count": len(sample_manifest),
             "entry_table_offset": parsed.entry_table_offset,
             "entry_table_offset_hex": f"0x{parsed.entry_table_offset:X}",
             "entry_stride": parsed.entry_stride,
             "entry_stride_hex": f"0x{parsed.entry_stride:X}",
             "rate_values_found": list(parsed.rate_values),
             "rate_table_source": parsed.rate_source,
+            "rate_table_layout": parsed.rate_layout,
+            "rate_reference_count": len(parsed.rate_references),
             "rate_mapping_source": rate_mapping_source,
             "samples": sample_manifest,
         },
@@ -2075,7 +2882,7 @@ def _find_bulk_file(
 
     if not candidates:
         raise StreamTableError(
-            "NiemaFS did not expose a bulk file; streamed audio cannot be read"
+            "no bulk/companion audio file was exposed; streamed audio cannot be read"
         )
     if len(candidates) > 1:
         candidates.sort(key=lambda item: len(item[1]), reverse=True)
@@ -2083,7 +2890,7 @@ def _find_bulk_file(
 
     if archive.bulk_size not in (None, 0, len(data)):
         raise StreamTableError(
-            f"NiemaFS reports bulk_size=0x{archive.bulk_size:X}, but "
+            f"archive metadata reports bulk_size=0x{archive.bulk_size:X}, but "
             f"{path.as_posix()} contains 0x{len(data):X} bytes"
         )
     return path, data
@@ -2305,6 +3112,184 @@ def extract_streamed_audio(
     return result, warnings, failures
 
 
+def extract_third_age_streamed_audio(
+    archive: LoadedArchive,
+    output_root: Path,
+    forced_sample_rate: int | None,
+    ffmpeg: str,
+) -> tuple[dict[str, object], list[str], list[dict[str, str]]]:
+    """Extract all streams indexed in a Third Age companion ``.sas`` file."""
+
+    bulk_path, bulk_data = _find_bulk_file(archive)
+    table = find_third_age_stream_table(
+        archive.files,
+        bulk_size=len(bulk_data),
+        preferred_endian=_preferred_endian(archive),
+    )
+
+    warnings: list[str] = []
+    failures: list[dict[str, str]] = []
+    stream_manifest: list[dict[str, object]] = []
+    streamed_root = output_root / "streamed"
+    used_names: set[str] = set()
+
+    indexed_end = max(
+        entry.bulk_offset + entry.stored_size for entry in table.entries
+    )
+    trailing_size = len(bulk_data) - indexed_end
+    trailing_nonzero = bool(trailing_size and any(bulk_data[indexed_end:]))
+    if trailing_nonzero:
+        warnings.append(
+            f"the companion SAS contains 0x{trailing_size:X} non-indexed bytes "
+            "after the final stream, and they are not entirely zero-filled"
+        )
+
+    for entry in tqdm(table.entries, total=len(table.entries)):
+        sample_rate = forced_sample_rate or entry.sample_rate
+        if not MIN_REASONABLE_SAMPLE_RATE <= sample_rate <= MAX_REASONABLE_SAMPLE_RATE:
+            failures.append(
+                {
+                    "stream_index": str(entry.index),
+                    "error": f"implausible sample rate {sample_rate}",
+                }
+            )
+            continue
+
+        try:
+            (
+                pcm,
+                channel_sample_counts,
+                padded_samples,
+                final_block_size,
+            ) = decode_third_age_streamed_dsp(
+                bulk_data=bulk_data,
+                entry=entry,
+                coefficient_endian=table.endian,
+            )
+        except DspDecodeError as error:
+            failures.append(
+                {
+                    "stream_index": str(entry.index),
+                    "error": str(error),
+                }
+            )
+            continue
+
+        output_name, _movie_name, _cue_name = stream_output_name(
+            entry,
+            stream_names={},
+            bindings={},
+            used_names=used_names,
+        )
+        output_path = streamed_root / output_name
+        try:
+            write_flac(
+                output_path,
+                pcm,
+                sample_rate,
+                entry.channels,
+                ffmpeg=ffmpeg,
+            )
+        except FlacEncodeError as error:
+            failures.append(
+                {
+                    "stream_index": str(entry.index),
+                    "error": str(error),
+                }
+            )
+            continue
+
+        output_frames = len(pcm) // entry.channels
+        stream_manifest.append(
+            {
+                "stream_index": entry.index,
+                "stream_group": entry.group_index,
+                "stream_index_in_group": entry.group_entry_index,
+                "stream_record_type": entry.record_type,
+                "stream_record_type_hex": (
+                    f"0x{entry.record_type:X}"
+                    if entry.record_type is not None
+                    else None
+                ),
+                "output_path": output_path.relative_to(output_root).as_posix(),
+                "sample_rate": sample_rate,
+                "metadata_sample_rate": entry.sample_rate,
+                "metadata_sample_rate_raw": entry.sample_rate_raw,
+                "metadata_sample_rate_raw_hex": (
+                    f"0x{entry.sample_rate_raw:X}"
+                    if entry.sample_rate_raw is not None
+                    else None
+                ),
+                "metadata_sample_rate_encoding": entry.sample_rate_encoding,
+                "channels": entry.channels,
+                "sample_format": "signed 16-bit PCM",
+                "output_frames": output_frames,
+                "duration_seconds": round(output_frames / sample_rate, 9),
+                "channel_sample_counts_before_padding": channel_sample_counts,
+                "padded_samples": padded_samples,
+                "sas_offset": entry.bulk_offset,
+                "sas_offset_hex": f"0x{entry.bulk_offset:X}",
+                "stored_size": entry.stored_size,
+                "stored_size_hex": f"0x{entry.stored_size:X}",
+                "physical_block_size": STREAM_BLOCK_SIZE,
+                "physical_block_header_size": STREAM_BLOCK_HEADER_SIZE,
+                "blocks_per_channel": entry.block_count,
+                "final_block_padding": entry.field_10,
+                "final_block_padding_hex": f"0x{entry.field_10:X}",
+                "final_physical_block_size": final_block_size,
+                "final_physical_block_size_hex": f"0x{final_block_size:X}",
+                "metadata_flags": entry.flags,
+                "metadata_flags_hex": f"0x{entry.flags:X}",
+                "metadata_unknown_04": entry.unknown_04,
+                "metadata_field_17": entry.field_17,
+            }
+        )
+
+    result: dict[str, object] = {
+        "bulk_path": bulk_path.as_posix(),
+        "source_sas_path": (
+            str(archive.bulk_source_path)
+            if archive.bulk_source_path is not None
+            else None
+        ),
+        "bulk_size": len(bulk_data),
+        "indexed_bulk_end": indexed_end,
+        "indexed_bulk_end_hex": f"0x{indexed_end:X}",
+        "trailing_unindexed_size": trailing_size,
+        "trailing_unindexed_size_hex": f"0x{trailing_size:X}",
+        "trailing_unindexed_bytes_are_zero": not trailing_nonzero,
+        "stream_table_shdr_path": table.source_path.as_posix(),
+        "stream_table_layout": table.layout,
+        "stream_table_byte_order": table.byte_order,
+        "stream_table_section_offset": table.section_offset,
+        "stream_table_section_offset_hex": f"0x{table.section_offset:X}",
+        "stream_table_section_size": table.section_size,
+        "stream_table_record_stride": table.record_stride,
+        "stream_record_count": len(table.entries),
+        "stream_group_offset_table_offset": table.group_offset_table_offset,
+        "stream_group_data_offset": table.group_data_offset,
+        "stream_group_data_size": table.group_data_size,
+        "stream_group_end_offset": table.group_end_offset,
+        "stream_groups": [
+            {
+                "group_index": group.index,
+                "relative_offset": group.relative_offset,
+                "relative_offset_hex": f"0x{group.relative_offset:X}",
+                "data_offset": group.data_offset,
+                "data_offset_hex": f"0x{group.data_offset:X}",
+                "record_count": group.record_count,
+                "record_type": group.record_type,
+                "record_type_hex": f"0x{group.record_type:X}",
+            }
+            for group in table.groups
+        ],
+        "extracted_stream_count": len(stream_manifest),
+        "ignored_streams": [],
+        "streams": stream_manifest,
+    }
+    return result, warnings, failures
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2406,10 +3391,50 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         sample_bank_manifests.append(bank_manifest)
         warnings.extend(bank_warnings)
-        print(f"  wrote {bank_manifest['entry_count']} mono FLAC files")
+        print(f"  wrote {bank_manifest['output_file_count']} mono FLAC files")
 
     streamed_manifest: dict[str, object] | None = None
-    if archive.canonical_format in {"scg", "scw"}:
+    if archive.archive_variant in THIRD_AGE_ARCHIVE_VARIANTS:
+        source_text = (
+            f" from companion SAS {archive.bulk_source_path}"
+            if archive.bulk_source_path is not None
+            else " from the NiemaFS bulk resource"
+        )
+        print(f"Extracting long streamed audio{source_text} ...")
+        try:
+            streamed_manifest, stream_warnings, stream_failures = (
+                extract_third_age_streamed_audio(
+                    archive=archive,
+                    output_root=output_root,
+                    forced_sample_rate=args.sample_rate,
+                    ffmpeg=ffmpeg,
+                )
+            )
+            warnings.extend(stream_warnings)
+            failures.extend(
+                {
+                    "kind": "streamed_audio",
+                    "source": f"stream {failure['stream_index']}",
+                    "error": failure["error"],
+                }
+                for failure in stream_failures
+            )
+            print(
+                f"  detected {streamed_manifest['stream_table_layout']} "
+                f"stream table ({streamed_manifest['stream_record_count']} "
+                f"records, {len(streamed_manifest['stream_groups'])} groups)"
+            )
+            print(
+                f"  wrote {streamed_manifest['extracted_stream_count']} "
+                "streamed FLAC files"
+            )
+        except AudioExtractionError as error:
+            warnings.append(f"streamed audio was not extracted: {error}")
+            print(
+                f"warning: streamed audio was not extracted: {error}",
+                file=sys.stderr,
+            )
+    elif archive.canonical_format in {"scg", "scw"}:
         print("Extracting long streamed audio from the archive bulk area ...")
         try:
             streamed_manifest, stream_warnings, stream_failures = (
@@ -2452,7 +3477,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
     short_audio_count = sum(
-        int(bank["entry_count"]) for bank in sample_bank_manifests
+        int(bank.get("output_file_count", bank["entry_count"]))
+        for bank in sample_bank_manifests
     )
     streamed_audio_count = (
         int(streamed_manifest["extracted_stream_count"])
@@ -2462,8 +3488,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     total_audio_count = short_audio_count + streamed_audio_count
 
     manifest = {
-        "tool": "extract_audio.py",
+        "tool": Path(__file__).name,
         "source_archive": str(target_path),
+        "source_companion_sas": (
+            str(archive.bulk_source_path)
+            if archive.bulk_source_path is not None
+            else None
+        ),
         "filesystem_class": archive.fs_class_name,
         "archive_format": archive.archive_format,
         "archive_variant": archive.archive_variant,
