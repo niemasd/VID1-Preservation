@@ -135,10 +135,13 @@ https://www.youtube.com/playlist?list=PLGGFX-hnXvGpQXRrbGgdYpQSXLwsojndG
 * **`isenfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=1306
     * `Data/Game/ise/ise01.scg/streamed/ISENFMV2.flac`
 * **`mtwlfmv1.vid`:** https://youtu.be/BKy6IZ8HuCE?t=21
+    * `Data/Game/min/min00.scg/streamed/STREAM_G09_I0024_T0F.flac`
 * **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
 * **`osgifmv1.vid`:** https://youtu.be/5IjEfHZxcSM?t=21
+    * `Data/Game/osg/osg01.scg/streamed/STREAM_G02_I0002_T0F.flac`
 * **`osgifmv2.vid`:** https://youtu.be/5IjEfHZxcSM?t=829
 * **`pat1fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=29
+    * `Data/Game/pat/pat01.scg/streamed/STREAM_G02_I0004_T0F.flac`
 * **`pat1fmv2.vid`:** https://youtu.be/JtgPV8jRLLg?t=866
 * **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
 * **`pelefmv1.vid`:** https://youtu.be/Fe0SuecJ7QQ?t=21
