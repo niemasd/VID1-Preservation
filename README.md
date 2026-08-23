@@ -165,10 +165,15 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`e1c1f01.vid`:** https://youtu.be/fQy1RELNIhs?t=78
     * `data/game/globscen.scg/STREAM_S04_C00_G01_I0001_T0F.flac`
 * **`e1c1f02.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0002_T0F.flac`
 * **`e1c1f03.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0003_T0F.flac`
 * **`e1c1f04.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0004_T0F.flac`
 * **`e1c1f05.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0005_T0F.flac`
 * **`e1c1f06.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0006_T0F.flac`
 * **`e1c1f07.vid`:** TODO
 * **`e1c1f08.vid`:** TODO
 * **`e1c1f09.vid`:** TODO
