@@ -187,7 +187,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`e1c1f12.vid`:** TODO
     * `data/game/globscen.scg/STREAM_S04_C00_G01_I0012_T0F.flac`
 * **`e1c1idri.vid`:** TODO
-* **`e1c2f01.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0013_T0F.flac`
 * **`e1c2f02.vid`:** TODO
 * **`e1c2f03.vid`:** TODO
 * **`e1c2f04.vid`:** TODO
