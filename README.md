@@ -116,40 +116,40 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 #### *The Lord of the Rings: The Return of the King* (DOL-GKLE-USA)
 
 * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
-    * `Data/Game/cra/cra01.scg/streamed/STREAM_G02_I0002_T0F.flac`
+    * `data/game/cra/cra01.scg/streamed/STREAM_G02_I0002_T0F.flac`
 * **`endfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=261
-    * `Data/Game/cra/cra01.scg/streamed/STREAM_G02_I0000_T0F.flac`
+    * `data/game/cra/cra01.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`gatefmv1.vid`:** https://youtu.be/N0XYUlxVmWM?t=19
-    * `Data/Game/bla/bla01.scg/streamed/STREAM_G02_I0006_T0F.flac`
+    * `data/game/bla/bla01.scg/streamed/STREAM_G02_I0006_T0F.flac`
 * **`gatefmv2.vid`:** https://youtu.be/N0XYUlxVmWM?t=656
-    * `Data/Game/bla/bla01.scg/streamed/STREAM_G02_I0000_T0F.flac`
+    * `data/game/bla/bla01.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`helmfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=0
-    * `Data/Game/hel/hel01.scg/streamed/STREAM_G02_I0002_T0F.flac`
+    * `data/game/hel/hel01.scg/streamed/STREAM_G02_I0002_T0F.flac`
 * **`helmfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=382
-    * `Data/Game/hel/hel01.scg/streamed/STREAM_G02_I0000_T0F.flac`
+    * `data/game/hel/hel01.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`isenfmv1.vid`:** https://youtu.be/Uode2xTpBsU?t=715
-    * `Data/Game/ise/ise01.scg/streamed/STREAM_G02_I0010_T0F.flac`
+    * `data/game/ise/ise01.scg/streamed/STREAM_G02_I0010_T0F.flac`
 * **`isenfmv2.vid`:** https://youtu.be/Uode2xTpBsU?t=1306
-    * `Data/Game/ise/ise01.scg/streamed/ISENFMV2.flac`
+    * `data/game/ise/ise01.scg/streamed/ISENFMV2.flac`
 * **`mtwlfmv1.vid`:** https://youtu.be/BKy6IZ8HuCE?t=21
-    * `Data/Game/min/min00.scg/streamed/STREAM_G09_I0024_T0F.flac`
+    * `data/game/min/min00.scg/streamed/STREAM_G09_I0024_T0F.flac`
 * **`mtydfmv2.vid`:** https://youtu.be/BKy6IZ8HuCE?t=1514
-    * `Data/Game/min/min04.scg/streamed/STREAM_G02_I0000_T0F.flac`
+    * `data/game/min/min04.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`osgifmv1.vid`:** https://youtu.be/5IjEfHZxcSM?t=21
-    * `Data/Game/osg/osg01.scg/streamed/STREAM_G02_I0002_T0F.flac`
+    * `data/game/osg/osg01.scg/streamed/STREAM_G02_I0002_T0F.flac`
 * **`osgifmv2.vid`:** https://youtu.be/5IjEfHZxcSM?t=829
-    * `Data/Game/osg/osg01.scg/streamed/STREAM_G02_I0000_T0F.flac`
+    * `data/game/osg/osg01.scg/streamed/STREAM_G02_I0000_T0F.flac`
 * **`pat1fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=29
-    * `Data/Game/pat/pat01.scg/streamed/STREAM_G02_I0004_T0F.flac`
+    * `data/game/pat/pat01.scg/streamed/STREAM_G02_I0004_T0F.flac`
 * **`pat1fmv2.vid`:** https://youtu.be/JtgPV8jRLLg?t=866
-    * `Data/Game/pat/pat01.scg/streamed/STREAM_G02_I0006_T0F.flac`
+    * `data/game/pat/pat01.scg/streamed/STREAM_G02_I0006_T0F.flac`
 * **`pat2fmv1.vid`:** https://youtu.be/JtgPV8jRLLg?t=1079
     * Not sure (`pat2fmv1.vid` is just a 3 second black screen)
-    * `Data/Game/pat/pat02.scg/streamed/STREAM_G01_I0002_T0C.flac`
+    * `data/game/pat/pat02.scg/streamed/STREAM_G01_I0002_T0C.flac`
 * **`pelefmv1.vid`:** https://youtu.be/Fe0SuecJ7QQ?t=21
-    * `Data/Game/pel/pel02.scg/streamed/STREAM_G03_I0000_T0F.flac`
+    * `data/game/pel/pel02.scg/streamed/STREAM_G03_I0000_T0F.flac`
 * **`shelfmv1.vid`:** https://youtu.be/Z_a3P4TS4lk?t=19
-    * `Data/Game/she/she01.scg/streamed/STREAM_G03_I0014_T0F.flac`
+    * `data/game/she/she01.scg/streamed/STREAM_G03_I0014_T0F.flac`
 
 #### *The Lord of the Rings: The Third Age* (DOL-G3AE-USA)
 
@@ -161,6 +161,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 ##### Disc 1
 
 * **`attrloop.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S00_C00_G01_I0000_T0F.flac`
 * **`e1c1f01.vid`:** https://youtu.be/fQy1RELNIhs?t=78
 * **`e1c1f02.vid`:** TODO
 * **`e1c1f03.vid`:** TODO
@@ -213,6 +214,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`e2c2f04.vid`:** TODO
 * **`e2c2f06.vid`:** TODO
 * **`logo.vid`:** https://youtu.be/fQy1RELNIhs?t=4
+    * `data/game/globscen.scg/STREAM_S00_C00_G01_I0121_T0F.flac`
 
 ##### Disc 2
 
@@ -284,6 +286,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`e3c3f13.vid`:** TODO
 * **`e3c3f14.vid`:** TODO
 * **`logo.vid`:** https://youtu.be/fQy1RELNIhs?t=4
+    * `data/game/globscen.scg/STREAM_S00_C00_G01_I0121_T0F.flac`
 
 # Translating VID1 Video into M4V (deprecated)
 Because the VID1 *video codec* is very similar to MPEG-4 ASP, my original idea was to *translate* the VID1 video stream into MPEG-4 ASP as an M4V file using [`vid1_to_m4v.py`](vid1_to_m4v.py):
