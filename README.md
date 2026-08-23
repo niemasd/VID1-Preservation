@@ -110,10 +110,9 @@ However, the `.vid` file might not be *exactly* at the beginning or end of the `
 d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" && ffmpeg -i audio.flac -map 0:a:0 -ss START_TIME -t "$d" -c:a flac -compression_level 12 audio.trimmed.flac
 ```
 
-### YouTube Longplay Matches
-For the `.vid` files that did *not* have an extracted `.flac` with a matching name, here are the YouTube longplay matches to know what audio should be playing with it:
+For the `.vid` files that did *not* have an extracted `.flac` with a matching name (which was almost all of them), I watched YouTube longplay videos to know what audio should be playing with it.
 
-#### *The Lord of the Rings: The Return of the King* (DOL-GKLE-USA)
+### *The Lord of the Rings: The Return of the King* (DOL-GKLE-USA)
 
 * **`crakfmv1.vid`:** https://youtu.be/RS9HYaSOp5Y?t=20
     * `data/game/cra/cra01.scg/streamed/STREAM_G02_I0002_T0F.flac`
@@ -151,14 +150,14 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`shelfmv1.vid`:** https://youtu.be/Z_a3P4TS4lk?t=19
     * `data/game/she/she01.scg/streamed/STREAM_G03_I0014_T0F.flac`
 
-#### *The Lord of the Rings: The Third Age* (DOL-G3AE-USA)
+### *The Lord of the Rings: The Third Age* (DOL-G3AE-USA)
 
 * Part 1: https://www.youtube.com/watch?v=fQy1RELNIhs
 * Part 2: https://www.youtube.com/watch?v=CFsYvaNiMdo
 * Part 3: https://www.youtube.com/watch?v=bcbHMQnLFhk
 * Part 4: https://www.youtube.com/watch?v=biy_JAiWfJo
 
-##### Disc 1
+#### Disc 1
 
 * **`attrloop.vid`:** TODO
     * `data/game/globscen.scg/STREAM_S00_C00_G01_I0000_T0F.flac`
@@ -265,7 +264,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`logo.vid`:** https://youtu.be/fQy1RELNIhs?t=4
     * `data/game/globscen.scg/STREAM_S00_C00_G01_I0121_T0F.flac`
 
-##### Disc 2
+#### Disc 2
 
 * **`e2c2f03.vid`:** TODO
     * `data/game/globscen.scg/STREAM_S04_C01_G01_I0050_T0F.flac`
