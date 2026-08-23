@@ -231,21 +231,37 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`e1c3f04.vid`:** TODO
     * `data/game/globscen.scg/STREAM_S04_C00_G01_I0034_T0F.flac`
 * **`e1c3f05.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0035_T0F.flac`
 * **`e1c3f06.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0036_T0F.flac`
 * **`e1c3f07.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0037_T0F.flac`
 * **`e2c1f01.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0038_T0F.flac`
 * **`e2c1f02.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0039_T0F.flac`
 * **`e2c1f03.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0040_T0F.flac`
 * **`e2c1f04.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0041_T0F.flac`
 * **`e2c1f05.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0042_T0F.flac`
 * **`e2c1f06.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0043_T0F.flac`
 * **`e2c1f07.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0044_T0F.flac`
 * **`e2c1f08.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0045_T0F.flac`
 * **`e2c1f09.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0046_T0F.flac`
 * **`e2c1f10.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0047_T0F.flac`
 * **`e2c2f02.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0049_T0F.flac`
 * **`e2c2f04.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0051_T0F.flac`
 * **`e2c2f06.vid`:** TODO
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0053_T0F.flac`
 * **`logo.vid`:** https://youtu.be/fQy1RELNIhs?t=4
     * `data/game/globscen.scg/STREAM_S00_C00_G01_I0121_T0F.flac`
 
