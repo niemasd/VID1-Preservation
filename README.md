@@ -163,6 +163,7 @@ For the `.vid` files that did *not* have an extracted `.flac` with a matching na
 * **`attrloop.vid`:** TODO
     * `data/game/globscen.scg/STREAM_S00_C00_G01_I0000_T0F.flac`
 * **`e1c1f01.vid`:** https://youtu.be/fQy1RELNIhs?t=78
+    * `data/game/globscen.scg/STREAM_S04_C00_G01_I0001_T0F.flac`
 * **`e1c1f02.vid`:** TODO
 * **`e1c1f03.vid`:** TODO
 * **`e1c1f04.vid`:** TODO
