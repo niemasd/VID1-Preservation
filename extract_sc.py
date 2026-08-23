@@ -14,10 +14,11 @@ NiemaFS exposes each archive's logical resources.  This extractor handles:
   at multiple distinct rates, one FLAC is written for every verified playback
   variant.
 * Long, interleaved DSP streams in an archive bulk area.
-* The Third Age's companion ``.sas`` streams when the installed NiemaFS
-  ``ScgFS`` exposes the same-stem SAS file under ``bulk/``.  Both chapter
-  STOC-v2 archives and the standalone global ``globscen.scg`` catalog are
-  supported.
+* The Third Age's companion ``.sas`` streams.  Chapter archives use the
+  same-stem SAS exposed by NiemaFS.  For the standalone global
+  ``globscen.scg`` catalog, the extractor additionally discovers and validates
+  adjacent variants such as ``globscen_d.sas`` so one invocation can extract
+  every companion source present beside the SCG.
 
 Use ``--skip_resources`` to omit sample-bank FLACs under ``resources`` while
 still extracting long audio under ``streamed``.  The logical resources remain
@@ -287,6 +288,26 @@ class ThirdAgeStreamSourceChain:
 
 
 @dataclass(frozen=True)
+class CompanionSasFile:
+    """One physical SAS candidate associated with an SCG archive."""
+
+    logical_path: Path
+    source_path: Path | None
+    data: bytes
+    discovery: str
+
+
+@dataclass(frozen=True)
+class SelectedGlobalCompanion:
+    """A physical global SAS file matched to one catalog source chain."""
+
+    companion: CompanionSasFile
+    chain: ThirdAgeStreamSourceChain
+    trailing_size: int
+    trailing_is_zero: bool
+
+
+@dataclass(frozen=True)
 class ParsedStreamTable:
     """A validated table describing long audio stored in the archive bulk area."""
 
@@ -312,6 +333,7 @@ class ParsedStreamTable:
 class LoadedArchive:
     """Logical resources and metadata needed by the audio extractors."""
 
+    source_path: Path
     files: dict[Path, bytes]
     fs: object | None
     fs_class_name: str
@@ -409,6 +431,7 @@ def load_archive(target_path: Path) -> LoadedArchive:
             companion_bulk_path = Path(companion_bulk_path)
 
         return LoadedArchive(
+            source_path=target_path,
             files=files,
             fs=fs,
             fs_class_name=fs_class.__name__,
@@ -3419,6 +3442,150 @@ def extract_sample_pair(
     )
 
 
+def _path_identity(path: Path) -> str:
+    """Return a stable identity used to deduplicate discovered companion files."""
+
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+    return str(resolved)
+
+
+def _find_global_companion_sas_files(
+    archive: LoadedArchive,
+) -> tuple[list[CompanionSasFile], list[str]]:
+    """Find every adjacent SAS candidate belonging to a global SCG catalog.
+
+    NiemaFS versions predating multi-companion support expose only the exact
+    same-stem file, such as ``globscen.sas``.  The game can also place another
+    source beside it under a suffixed name such as ``globscen_d.sas``.  Accept
+    the primary NiemaFS bulk resource plus adjacent ``<archive-stem>_*.sas``
+    files, then let the global catalog validator decide which source chain each
+    physical file actually contains.
+    """
+
+    candidates: list[CompanionSasFile] = []
+    warnings: list[str] = []
+    seen_sources: set[str] = set()
+    seen_logical_paths: set[str] = set()
+
+    def add_candidate(
+        logical_path: Path,
+        data: bytes,
+        source_path: Path | None,
+        discovery: str,
+    ) -> None:
+        source_key = _path_identity(source_path) if source_path is not None else None
+        logical_key = logical_path.as_posix().casefold()
+        if source_key is not None and source_key in seen_sources:
+            return
+        if logical_key in seen_logical_paths:
+            return
+        candidates.append(
+            CompanionSasFile(
+                logical_path=logical_path,
+                source_path=source_path,
+                data=data,
+                discovery=discovery,
+            )
+        )
+        if source_key is not None:
+            seen_sources.add(source_key)
+        seen_logical_paths.add(logical_key)
+
+    bulk_items = sorted(
+        (
+            (path, data)
+            for path, data in archive.files.items()
+            if path.parts and path.parts[0].lower() == "bulk"
+        ),
+        key=lambda item: item[0].as_posix().casefold(),
+    )
+    for logical_path, data in bulk_items:
+        source_path: Path | None = None
+        if archive.bulk_source_path is not None and (
+            len(bulk_items) == 1
+            or logical_path.name.casefold()
+            == archive.bulk_source_path.name.casefold()
+        ):
+            source_path = archive.bulk_source_path
+        add_candidate(
+            logical_path=logical_path,
+            data=data,
+            source_path=source_path,
+            discovery="NiemaFS bulk resource",
+        )
+
+    archive_stem = archive.source_path.stem.casefold()
+    try:
+        siblings = sorted(
+            archive.source_path.parent.iterdir(),
+            key=lambda path: path.name.casefold(),
+        )
+    except OSError as error:
+        siblings = []
+        warnings.append(
+            f"could not scan {archive.source_path.parent} for additional global "
+            f"SAS companions: {error}"
+        )
+
+    for candidate_path in siblings:
+        candidate_stem = candidate_path.stem.casefold()
+        if candidate_path.suffix.casefold() != ".sas":
+            continue
+        if not (
+            candidate_stem == archive_stem
+            or candidate_stem.startswith(archive_stem + "_")
+        ):
+            continue
+        try:
+            is_file = candidate_path.is_file()
+        except OSError:
+            is_file = False
+        if not is_file:
+            continue
+        source_key = _path_identity(candidate_path)
+        if source_key in seen_sources:
+            continue
+        try:
+            data = candidate_path.read_bytes()
+        except OSError as error:
+            warnings.append(
+                f"could not read global SAS candidate {candidate_path}: {error}"
+            )
+            continue
+        add_candidate(
+            logical_path=Path("bulk") / candidate_path.name,
+            data=data,
+            source_path=candidate_path,
+            discovery="adjacent global companion scan",
+        )
+
+    if not candidates:
+        raise StreamTableError(
+            "no bulk/companion audio file was exposed or discovered; global "
+            "streamed audio cannot be read"
+        )
+
+    candidates.sort(
+        key=lambda companion: (
+            0
+            if (
+                companion.source_path is not None
+                and companion.source_path.stem.casefold() == archive_stem
+            )
+            else 1,
+            (
+                companion.source_path.name
+                if companion.source_path is not None
+                else companion.logical_path.name
+            ).casefold(),
+        )
+    )
+    return candidates, warnings
+
+
 def _find_bulk_file(
     archive: LoadedArchive,
 ) -> tuple[Path, bytes]:
@@ -3844,154 +4011,342 @@ def extract_third_age_global_streamed_audio(
     forced_sample_rate: int | None,
     ffmpeg: str,
 ) -> tuple[dict[str, object], list[str], list[dict[str, str]]]:
-    """Extract the source/disc chain present in ``globscen.sas``."""
+    """Extract every validated physical SAS source beside ``globscen.scg``."""
 
-    bulk_path, bulk_data = _find_bulk_file(archive)
+    companions, discovery_warnings = _find_global_companion_sas_files(archive)
     table, source_chains = find_third_age_global_stream_table(
         archive.files,
         preferred_endian=_preferred_endian(archive),
     )
-    selected_chain, trailing_size, trailing_is_zero = (
-        select_third_age_global_source_chain(
-            bulk_data,
-            source_chains,
-            coefficient_endian=table.endian,
+
+    warnings: list[str] = list(discovery_warnings)
+    failures: list[dict[str, str]] = []
+    rejected_companions: list[dict[str, object]] = []
+    selections: list[SelectedGlobalCompanion] = []
+    selection_by_chain: dict[tuple[int, int], SelectedGlobalCompanion] = {}
+
+    for companion in companions:
+        companion_label = (
+            str(companion.source_path)
+            if companion.source_path is not None
+            else companion.logical_path.as_posix()
+        )
+        try:
+            chain, trailing_size, trailing_is_zero = (
+                select_third_age_global_source_chain(
+                    companion.data,
+                    source_chains,
+                    coefficient_endian=table.endian,
+                )
+            )
+        except StreamTableError as error:
+            warnings.append(
+                f"global SAS candidate {companion_label} was not extracted: {error}"
+            )
+            rejected_companions.append(
+                {
+                    "bulk_path": companion.logical_path.as_posix(),
+                    "source_sas_path": (
+                        str(companion.source_path)
+                        if companion.source_path is not None
+                        else None
+                    ),
+                    "bulk_size": len(companion.data),
+                    "discovery": companion.discovery,
+                    "status": "did not match a validated source chain",
+                    "error": str(error),
+                }
+            )
+            continue
+
+        chain_key = (chain.source_selector, chain.chain_index)
+        previous = selection_by_chain.get(chain_key)
+        if previous is not None:
+            logical_size = chain.logical_size
+            same_payload = (
+                memoryview(previous.companion.data)[:logical_size]
+                == memoryview(companion.data)[:logical_size]
+            )
+            previous_label = (
+                str(previous.companion.source_path)
+                if previous.companion.source_path is not None
+                else previous.companion.logical_path.as_posix()
+            )
+            if same_payload:
+                warnings.append(
+                    f"global SAS candidate {companion_label} duplicates source "
+                    f"{chain.source_selector} chain {chain.chain_index} already "
+                    f"provided by {previous_label}; skipped the duplicate"
+                )
+                rejected_companions.append(
+                    {
+                        "bulk_path": companion.logical_path.as_posix(),
+                        "source_sas_path": (
+                            str(companion.source_path)
+                            if companion.source_path is not None
+                            else None
+                        ),
+                        "bulk_size": len(companion.data),
+                        "discovery": companion.discovery,
+                        "status": "duplicate source chain",
+                        "duplicate_of": previous_label,
+                        "source_selector": chain.source_selector,
+                        "source_chain_index": chain.chain_index,
+                    }
+                )
+                continue
+            raise StreamTableError(
+                f"{previous_label} and {companion_label} both validate as source "
+                f"{chain.source_selector} chain {chain.chain_index}, but their "
+                "indexed audio bytes differ; refusing to overwrite one source "
+                "with an ambiguous alternative"
+            )
+
+        selected = SelectedGlobalCompanion(
+            companion=companion,
+            chain=chain,
+            trailing_size=trailing_size,
+            trailing_is_zero=trailing_is_zero,
+        )
+        selections.append(selected)
+        selection_by_chain[chain_key] = selected
+
+    if not selections:
+        raise StreamTableError(
+            "none of the discovered global SAS candidates matched a validated "
+            "source chain"
+        )
+
+    selections.sort(
+        key=lambda selected: (
+            selected.chain.source_selector,
+            selected.chain.chain_index,
+            (
+                selected.companion.source_path.name
+                if selected.companion.source_path is not None
+                else selected.companion.logical_path.name
+            ).casefold(),
         )
     )
 
-    warnings: list[str] = []
-    failures: list[dict[str, str]] = []
     stream_manifest: list[dict[str, object]] = []
+    companion_manifests: list[dict[str, object]] = []
     streamed_root = output_root / "streamed"
-    if trailing_size:
-        warnings.append(
-            f"the selected global source chain ends at 0x{selected_chain.logical_size:X}; "
-            f"the companion has 0x{trailing_size:X} trailing bytes, which are "
-            + ("zero-filled" if trailing_is_zero else "not entirely zero-filled")
-        )
-
     used_names: set[str] = set()
-    for entry in tqdm(
-        selected_chain.entries,
-        total=len(selected_chain.entries),
-    ):
-        sample_rate = forced_sample_rate or entry.sample_rate
-        if not MIN_REASONABLE_SAMPLE_RATE <= sample_rate <= MAX_REASONABLE_SAMPLE_RATE:
-            failures.append(
-                {
-                    "stream_index": str(entry.index),
-                    "error": f"implausible sample rate {sample_rate}",
-                }
-            )
-            continue
 
-        try:
-            (
-                pcm,
-                channel_sample_counts,
-                padded_samples,
-                final_block_size,
-            ) = decode_third_age_streamed_dsp(
-                bulk_data=bulk_data,
-                entry=entry,
-                coefficient_endian=table.endian,
-            )
-        except DspDecodeError as error:
-            failures.append(
-                {
-                    "stream_index": str(entry.index),
-                    "error": str(error),
-                }
-            )
-            continue
-
-        record_type = entry.record_type if entry.record_type is not None else 0
-        stem = (
-            f"STREAM_S{entry.field_17:02d}_"
-            f"C{selected_chain.chain_index:02d}_"
-            f"G{entry.group_index or 0:02d}_"
-            f"I{entry.group_entry_index or 0:04d}_"
-            f"T{record_type:02X}"
+    for selected in selections:
+        companion = selected.companion
+        selected_chain = selected.chain
+        companion_label = (
+            str(companion.source_path)
+            if companion.source_path is not None
+            else companion.logical_path.as_posix()
         )
-        output_name = stem + ".flac"
-        if output_name.lower() in used_names:
-            output_name = f"{stem}_stream{entry.index:04d}.flac"
-        used_names.add(output_name.lower())
-        output_path = streamed_root / output_name
-
-        try:
-            write_flac(
-                output_path,
-                pcm,
-                sample_rate,
-                entry.channels,
-                ffmpeg=ffmpeg,
+        if selected.trailing_size:
+            warnings.append(
+                f"{companion_label}: selected source chain ends at "
+                f"0x{selected_chain.logical_size:X}; the companion has "
+                f"0x{selected.trailing_size:X} trailing bytes, which are "
+                + (
+                    "zero-filled"
+                    if selected.trailing_is_zero
+                    else "not entirely zero-filled"
+                )
             )
-        except FlacEncodeError as error:
-            failures.append(
+
+        stream_start = len(stream_manifest)
+        failure_start = len(failures)
+        for entry in tqdm(
+            selected_chain.entries,
+            total=len(selected_chain.entries),
+            desc=companion.logical_path.name,
+            unit="stream",
+        ):
+            sample_rate = forced_sample_rate or entry.sample_rate
+            if not MIN_REASONABLE_SAMPLE_RATE <= sample_rate <= MAX_REASONABLE_SAMPLE_RATE:
+                failures.append(
+                    {
+                        "stream_index": str(entry.index),
+                        "source_sas": companion_label,
+                        "source_selector": str(selected_chain.source_selector),
+                        "source_chain_index": str(selected_chain.chain_index),
+                        "error": f"implausible sample rate {sample_rate}",
+                    }
+                )
+                continue
+
+            try:
+                (
+                    pcm,
+                    channel_sample_counts,
+                    padded_samples,
+                    final_block_size,
+                ) = decode_third_age_streamed_dsp(
+                    bulk_data=companion.data,
+                    entry=entry,
+                    coefficient_endian=table.endian,
+                )
+            except DspDecodeError as error:
+                failures.append(
+                    {
+                        "stream_index": str(entry.index),
+                        "source_sas": companion_label,
+                        "source_selector": str(selected_chain.source_selector),
+                        "source_chain_index": str(selected_chain.chain_index),
+                        "error": str(error),
+                    }
+                )
+                continue
+
+            record_type = entry.record_type if entry.record_type is not None else 0
+            stem = (
+                f"STREAM_S{entry.field_17:02d}_"
+                f"C{selected_chain.chain_index:02d}_"
+                f"G{entry.group_index or 0:02d}_"
+                f"I{entry.group_entry_index or 0:04d}_"
+                f"T{record_type:02X}"
+            )
+            output_name = stem + ".flac"
+            if output_name.lower() in used_names:
+                output_name = f"{stem}_stream{entry.index:04d}.flac"
+            used_names.add(output_name.lower())
+            output_path = streamed_root / output_name
+
+            try:
+                write_flac(
+                    output_path,
+                    pcm,
+                    sample_rate,
+                    entry.channels,
+                    ffmpeg=ffmpeg,
+                )
+            except FlacEncodeError as error:
+                failures.append(
+                    {
+                        "stream_index": str(entry.index),
+                        "source_sas": companion_label,
+                        "source_selector": str(selected_chain.source_selector),
+                        "source_chain_index": str(selected_chain.chain_index),
+                        "error": str(error),
+                    }
+                )
+                continue
+
+            output_frames = len(pcm) // entry.channels
+            stream_manifest.append(
                 {
-                    "stream_index": str(entry.index),
-                    "error": str(error),
+                    "stream_index": entry.index,
+                    "stream_group": entry.group_index,
+                    "stream_index_in_group": entry.group_entry_index,
+                    "stream_record_type": entry.record_type,
+                    "stream_record_type_hex": (
+                        f"0x{entry.record_type:X}"
+                        if entry.record_type is not None
+                        else None
+                    ),
+                    "source_selector": entry.field_17,
+                    "source_chain_index": entry.source_chain_index,
+                    "source_chain_entry_index": entry.source_chain_entry_index,
+                    "bulk_path": companion.logical_path.as_posix(),
+                    "source_sas_path": (
+                        str(companion.source_path)
+                        if companion.source_path is not None
+                        else None
+                    ),
+                    "companion_discovery": companion.discovery,
+                    "output_path": output_path.relative_to(output_root).as_posix(),
+                    "sample_rate": sample_rate,
+                    "metadata_sample_rate": entry.sample_rate,
+                    "metadata_sample_rate_raw": entry.sample_rate_raw,
+                    "metadata_sample_rate_raw_hex": (
+                        f"0x{entry.sample_rate_raw:X}"
+                        if entry.sample_rate_raw is not None
+                        else None
+                    ),
+                    "metadata_sample_rate_encoding": entry.sample_rate_encoding,
+                    "channels": entry.channels,
+                    "sample_format": "signed 16-bit PCM",
+                    "output_frames": output_frames,
+                    "duration_seconds": round(output_frames / sample_rate, 9),
+                    "channel_sample_counts_before_padding": channel_sample_counts,
+                    "padded_samples": padded_samples,
+                    "sas_offset": entry.bulk_offset,
+                    "sas_offset_hex": f"0x{entry.bulk_offset:X}",
+                    "stored_size": entry.stored_size,
+                    "stored_size_hex": f"0x{entry.stored_size:X}",
+                    "physical_block_size": STREAM_BLOCK_SIZE,
+                    "physical_block_header_size": STREAM_BLOCK_HEADER_SIZE,
+                    "blocks_per_channel": entry.block_count,
+                    "final_block_padding": entry.field_10,
+                    "final_block_padding_hex": f"0x{entry.field_10:X}",
+                    "final_physical_block_size": final_block_size,
+                    "final_physical_block_size_hex": f"0x{final_block_size:X}",
+                    "metadata_flags": entry.flags,
+                    "metadata_flags_hex": f"0x{entry.flags:X}",
+                    "metadata_unknown_04": entry.unknown_04,
                 }
             )
-            continue
 
-        output_frames = len(pcm) // entry.channels
-        stream_manifest.append(
+        companion_manifests.append(
             {
-                "stream_index": entry.index,
-                "stream_group": entry.group_index,
-                "stream_index_in_group": entry.group_entry_index,
-                "stream_record_type": entry.record_type,
-                "stream_record_type_hex": (
-                    f"0x{entry.record_type:X}"
-                    if entry.record_type is not None
+                "bulk_path": companion.logical_path.as_posix(),
+                "source_sas_path": (
+                    str(companion.source_path)
+                    if companion.source_path is not None
                     else None
                 ),
-                "source_selector": entry.field_17,
-                "source_chain_index": entry.source_chain_index,
-                "source_chain_entry_index": entry.source_chain_entry_index,
-                "output_path": output_path.relative_to(output_root).as_posix(),
-                "sample_rate": sample_rate,
-                "metadata_sample_rate": entry.sample_rate,
-                "metadata_sample_rate_raw": entry.sample_rate_raw,
-                "metadata_sample_rate_raw_hex": (
-                    f"0x{entry.sample_rate_raw:X}"
-                    if entry.sample_rate_raw is not None
-                    else None
+                "discovery": companion.discovery,
+                "bulk_size": len(companion.data),
+                "bulk_size_hex": f"0x{len(companion.data):X}",
+                "selected_source_selector": selected_chain.source_selector,
+                "selected_source_chain_index": selected_chain.chain_index,
+                "selected_source_stream_count": len(selected_chain.entries),
+                "selected_source_logical_size": selected_chain.logical_size,
+                "selected_source_logical_size_hex": (
+                    f"0x{selected_chain.logical_size:X}"
                 ),
-                "metadata_sample_rate_encoding": entry.sample_rate_encoding,
-                "channels": entry.channels,
-                "sample_format": "signed 16-bit PCM",
-                "output_frames": output_frames,
-                "duration_seconds": round(output_frames / sample_rate, 9),
-                "channel_sample_counts_before_padding": channel_sample_counts,
-                "padded_samples": padded_samples,
-                "sas_offset": entry.bulk_offset,
-                "sas_offset_hex": f"0x{entry.bulk_offset:X}",
-                "stored_size": entry.stored_size,
-                "stored_size_hex": f"0x{entry.stored_size:X}",
-                "physical_block_size": STREAM_BLOCK_SIZE,
-                "physical_block_header_size": STREAM_BLOCK_HEADER_SIZE,
-                "blocks_per_channel": entry.block_count,
-                "final_block_padding": entry.field_10,
-                "final_block_padding_hex": f"0x{entry.field_10:X}",
-                "final_physical_block_size": final_block_size,
-                "final_physical_block_size_hex": f"0x{final_block_size:X}",
-                "metadata_flags": entry.flags,
-                "metadata_flags_hex": f"0x{entry.flags:X}",
-                "metadata_unknown_04": entry.unknown_04,
+                "trailing_unindexed_size": selected.trailing_size,
+                "trailing_unindexed_size_hex": f"0x{selected.trailing_size:X}",
+                "trailing_unindexed_bytes_are_zero": selected.trailing_is_zero,
+                "extracted_stream_count": len(stream_manifest) - stream_start,
+                "failed_stream_count": len(failures) - failure_start,
             }
         )
 
+    matched_chain_keys = set(selection_by_chain)
+    unmatched_chains = [
+        chain
+        for chain in source_chains
+        if (chain.source_selector, chain.chain_index) not in matched_chain_keys
+    ]
+    for chain in unmatched_chains:
+        warnings.append(
+            f"no discovered companion SAS matched global source "
+            f"{chain.source_selector} chain {chain.chain_index} "
+            f"({len(chain.entries)} records, logical size "
+            f"0x{chain.logical_size:X}); those records were not extracted"
+        )
+
+    single_selection = selections[0] if len(selections) == 1 else None
     result: dict[str, object] = {
-        "bulk_path": bulk_path.as_posix(),
-        "source_sas_path": (
-            str(archive.bulk_source_path)
-            if archive.bulk_source_path is not None
+        # Singular keys are retained for manifest compatibility.  They are only
+        # populated when exactly one physical companion was selected.
+        "bulk_path": (
+            single_selection.companion.logical_path.as_posix()
+            if single_selection is not None
             else None
         ),
-        "bulk_size": len(bulk_data),
+        "source_sas_path": (
+            str(single_selection.companion.source_path)
+            if single_selection is not None
+            and single_selection.companion.source_path is not None
+            else None
+        ),
+        "bulk_size": (
+            len(single_selection.companion.data)
+            if single_selection is not None
+            else None
+        ),
         "stream_table_shdr_path": table.source_path.as_posix(),
         "stream_table_layout": table.layout,
         "stream_table_byte_order": table.byte_order,
@@ -4023,6 +4378,10 @@ def extract_third_age_global_streamed_audio(
             }
             for group in table.groups
         ],
+        "discovered_companion_sas_file_count": len(companions),
+        "selected_companion_sas_file_count": len(selections),
+        "companion_sas_files": companion_manifests,
+        "rejected_companion_sas_files": rejected_companions,
         "source_chains": [
             {
                 "source_selector": chain.source_selector,
@@ -4030,24 +4389,98 @@ def extract_third_age_global_streamed_audio(
                 "stream_count": len(chain.entries),
                 "logical_size": chain.logical_size,
                 "logical_size_hex": f"0x{chain.logical_size:X}",
-                "selected_for_companion": chain == selected_chain,
+                "selected_for_companion": (
+                    chain.source_selector,
+                    chain.chain_index,
+                ) in matched_chain_keys,
+                "source_sas_path": (
+                    str(
+                        selection_by_chain[
+                            (chain.source_selector, chain.chain_index)
+                        ].companion.source_path
+                    )
+                    if (chain.source_selector, chain.chain_index)
+                    in selection_by_chain
+                    and selection_by_chain[
+                        (chain.source_selector, chain.chain_index)
+                    ].companion.source_path
+                    is not None
+                    else None
+                ),
             }
             for chain in source_chains
         ],
-        "selected_source_selector": selected_chain.source_selector,
-        "selected_source_chain_index": selected_chain.chain_index,
-        "selected_source_stream_count": len(selected_chain.entries),
-        "selected_source_logical_size": selected_chain.logical_size,
-        "selected_source_logical_size_hex": f"0x{selected_chain.logical_size:X}",
-        "trailing_unindexed_size": trailing_size,
-        "trailing_unindexed_size_hex": f"0x{trailing_size:X}",
-        "trailing_unindexed_bytes_are_zero": trailing_is_zero,
+        "selected_source_chains": [
+            {
+                "source_selector": selected.chain.source_selector,
+                "source_chain_index": selected.chain.chain_index,
+                "stream_count": len(selected.chain.entries),
+                "logical_size": selected.chain.logical_size,
+                "logical_size_hex": f"0x{selected.chain.logical_size:X}",
+                "source_sas_path": (
+                    str(selected.companion.source_path)
+                    if selected.companion.source_path is not None
+                    else None
+                ),
+                "bulk_path": selected.companion.logical_path.as_posix(),
+            }
+            for selected in selections
+        ],
+        "unmatched_source_chains": [
+            {
+                "source_selector": chain.source_selector,
+                "source_chain_index": chain.chain_index,
+                "stream_count": len(chain.entries),
+                "logical_size": chain.logical_size,
+                "logical_size_hex": f"0x{chain.logical_size:X}",
+            }
+            for chain in unmatched_chains
+        ],
+        "selected_source_selector": (
+            single_selection.chain.source_selector
+            if single_selection is not None
+            else None
+        ),
+        "selected_source_chain_index": (
+            single_selection.chain.chain_index
+            if single_selection is not None
+            else None
+        ),
+        "selected_source_stream_count": (
+            len(single_selection.chain.entries)
+            if single_selection is not None
+            else None
+        ),
+        "selected_source_logical_size": (
+            single_selection.chain.logical_size
+            if single_selection is not None
+            else None
+        ),
+        "selected_source_logical_size_hex": (
+            f"0x{single_selection.chain.logical_size:X}"
+            if single_selection is not None
+            else None
+        ),
+        "trailing_unindexed_size": (
+            single_selection.trailing_size
+            if single_selection is not None
+            else None
+        ),
+        "trailing_unindexed_size_hex": (
+            f"0x{single_selection.trailing_size:X}"
+            if single_selection is not None
+            else None
+        ),
+        "trailing_unindexed_bytes_are_zero": (
+            single_selection.trailing_is_zero
+            if single_selection is not None
+            else None
+        ),
         "extracted_stream_count": len(stream_manifest),
         "ignored_streams": [],
         "streams": stream_manifest,
     }
     return result, warnings, failures
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -4167,12 +4600,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     streamed_manifest: dict[str, object] | None = None
     if archive.archive_variant in THIRD_AGE_GLOBAL_ARCHIVE_VARIANTS:
-        source_text = (
-            f" from companion SAS {archive.bulk_source_path}"
-            if archive.bulk_source_path is not None
-            else " from the NiemaFS bulk resource"
+        print(
+            "Extracting global Third Age streamed audio from all matching "
+            "companion SAS files ..."
         )
-        print(f"Extracting global Third Age streamed audio{source_text} ...")
         try:
             streamed_manifest, stream_warnings, stream_failures = (
                 extract_third_age_global_streamed_audio(
@@ -4186,16 +4617,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             failures.extend(
                 {
                     "kind": "streamed_audio",
-                    "source": f"stream {failure['stream_index']}",
+                    "source": (
+                        f"{failure.get('source_sas', 'global SAS')} "
+                        f"stream {failure['stream_index']}"
+                    ),
                     "error": failure["error"],
                 }
                 for failure in stream_failures
             )
-            print(
-                f"  selected source {streamed_manifest['selected_source_selector']} "
-                f"chain {streamed_manifest['selected_source_chain_index']} "
-                f"({streamed_manifest['selected_source_stream_count']} records)"
-            )
+            for companion in streamed_manifest["companion_sas_files"]:
+                source_name = (
+                    companion["source_sas_path"] or companion["bulk_path"]
+                )
+                print(
+                    f"  {source_name}: selected source "
+                    f"{companion['selected_source_selector']} chain "
+                    f"{companion['selected_source_chain_index']} "
+                    f"({companion['selected_source_stream_count']} records; "
+                    f"wrote {companion['extracted_stream_count']})"
+                )
             print(
                 f"  wrote {streamed_manifest['extracted_stream_count']} "
                 "streamed FLAC files"
@@ -4299,6 +4739,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     total_audio_count = short_audio_count + streamed_audio_count
 
+    source_companion_sas_files: list[str] = []
+    if streamed_manifest is not None:
+        for companion in streamed_manifest.get("companion_sas_files", []):
+            if not isinstance(companion, Mapping):
+                continue
+            source = companion.get("source_sas_path") or companion.get("bulk_path")
+            if source is not None:
+                source_companion_sas_files.append(str(source))
+    if not source_companion_sas_files and archive.bulk_source_path is not None:
+        source_companion_sas_files.append(str(archive.bulk_source_path))
+
     manifest = {
         "tool": Path(__file__).name,
         "source_archive": str(target_path),
@@ -4307,6 +4758,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if archive.bulk_source_path is not None
             else None
         ),
+        "source_companion_sas_files": source_companion_sas_files,
         "filesystem_class": archive.fs_class_name,
         "archive_format": archive.archive_format,
         "archive_variant": archive.archive_variant,
