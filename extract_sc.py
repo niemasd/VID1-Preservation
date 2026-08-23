@@ -5,6 +5,7 @@ Usage:
 
     python3 extract_sc.py fro03.scg
     python3 extract_sc.py e01c01.scg
+    python3 extract_sc.py --skip_resources -o streamed_only e01c01.scg
 
 NiemaFS exposes each archive's logical resources.  This extractor handles:
 
@@ -14,7 +15,13 @@ NiemaFS exposes each archive's logical resources.  This extractor handles:
   variant.
 * Long, interleaved DSP streams in an archive bulk area.
 * The Third Age's companion ``.sas`` streams when the installed NiemaFS
-  ``ScgFS`` exposes the same-stem SAS file under ``bulk/``.
+  ``ScgFS`` exposes the same-stem SAS file under ``bulk/``.  Both chapter
+  STOC-v2 archives and the standalone global ``globscen.scg`` catalog are
+  supported.
+
+Use ``--skip_resources`` to omit sample-bank FLACs under ``resources`` while
+still extracting long audio under ``streamed``.  The logical resources remain
+loaded because their metadata is needed to locate and name streamed audio.
 
 Stream names are recovered from ``RPNS`` resources where a verified mapping is
 available.  Decoded signed 16-bit PCM is piped directly to FFmpeg and encoded
@@ -43,7 +50,7 @@ import subprocess
 import sys
 from array import array
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from struct import unpack_from
 from tqdm import tqdm
@@ -66,10 +73,16 @@ STREAM_GROUP_OFFSETS_OFFSET = 0x44
 STREAM_GROUP_DATA_OFFSET = 0x48
 STREAM_GROUP_DATA_SIZE_OFFSET = 0x4C
 STREAM_GROUP_END_OFFSET = 0x50
-THIRD_AGE_ARCHIVE_VARIANTS = frozenset({
+THIRD_AGE_CHAPTER_ARCHIVE_VARIANTS = frozenset({
     "third-age-stoc-v2-swvr",
     "third-age-stoc-swvr",
 })
+THIRD_AGE_GLOBAL_ARCHIVE_VARIANTS = frozenset({
+    "third-age-standalone-companion-sas",
+})
+THIRD_AGE_ARCHIVE_VARIANTS = (
+    THIRD_AGE_CHAPTER_ARCHIVE_VARIANTS | THIRD_AGE_GLOBAL_ARCHIVE_VARIANTS
+)
 THIRD_AGE_SAMPLE_RATE_SCALE = 32_000
 # The low header also contains a different count at 0x24.  The actual number
 # of playback-group relative offsets is the later copy at 0x78; some character
@@ -248,6 +261,8 @@ class StreamAudioEntry:
     record_type: int | None = None
     sample_rate_raw: int | None = None
     sample_rate_encoding: str | None = None
+    source_chain_index: int | None = None
+    source_chain_entry_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -259,6 +274,16 @@ class StreamGroup:
     data_offset: int
     record_count: int
     record_type: int
+
+
+@dataclass(frozen=True)
+class ThirdAgeStreamSourceChain:
+    """One independent offset namespace in the global Third Age stream table."""
+
+    source_selector: int
+    chain_index: int
+    entries: tuple[StreamAudioEntry, ...]
+    logical_size: int
 
 
 @dataclass(frozen=True)
@@ -1900,6 +1925,528 @@ def _parse_third_age_grouped_stream_table(
     )
 
 
+
+def _is_third_age_global_placeholder(
+    fixed_rate: int,
+    unknown_04: int,
+    bulk_offset: int,
+    stored_size: int,
+    field_10: int,
+    block_count: int,
+    flags: int,
+    channels: int,
+) -> bool:
+    """Recognize the unused slots in ``globscen``'s global stream catalog."""
+
+    return (
+        fixed_rate == 0
+        and unknown_04 == 0
+        and bulk_offset == 0xFFFFFFFF
+        and stored_size == 0
+        and field_10 == 0
+        and block_count == 0
+        and flags == 0
+        and channels == 0
+    )
+
+
+def _parse_third_age_global_stream_table(
+    data: bytes,
+    source_path: Path,
+    endian: str,
+) -> tuple[ParsedStreamTable, tuple[ThirdAgeStreamSourceChain, ...]]:
+    """Parse ``globscen``'s grouped, multi-source companion-SAS catalog.
+
+    The catalog uses the same 0x18-byte records as chapter SAS tables, but it
+    contains explicit empty slots and more than one independent offset
+    namespace.  The final byte of each record selects a source namespace.  A
+    source may restart at offset zero, which creates a separate disc/source
+    chain.  Treating all records as one monotonic SAS table is therefore wrong.
+    """
+
+    header_end = max(
+        THIRD_AGE_STREAM_GROUP_END_OFFSET,
+        0x7C,
+    ) + 4
+    if len(data) < header_end:
+        raise StreamTableError(
+            ".shdr is too small for the Third Age global stream pointers"
+        )
+
+    group_count = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_COUNT_OFFSET
+    )[0]
+    offsets_offset = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_OFFSETS_OFFSET
+    )[0]
+    group_data_offset = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_DATA_OFFSET
+    )[0]
+    group_data_size = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_DATA_SIZE_OFFSET
+    )[0]
+    group_end_offset = unpack_from(
+        endian + "I", data, THIRD_AGE_STREAM_GROUP_END_OFFSET
+    )[0]
+    group_count_copy = unpack_from(endian + "I", data, 0x7C)[0]
+
+    if not 1 <= group_count <= 0x1000:
+        raise StreamTableError(
+            f"implausible Third Age global stream-group count: {group_count}"
+        )
+    if group_count_copy != group_count:
+        raise StreamTableError(
+            "Third Age global stream-group count copies disagree: "
+            f"{group_count} versus {group_count_copy}"
+        )
+    offsets_size = group_count * 4
+    if not 0 <= offsets_offset <= len(data) - offsets_size:
+        raise StreamTableError(
+            "Third Age global group-offset array is outside the .shdr"
+        )
+    if group_data_offset != offsets_offset + offsets_size:
+        raise StreamTableError(
+            "Third Age global group data does not follow its offset array"
+        )
+    if group_end_offset != group_data_offset + group_data_size:
+        raise StreamTableError(
+            "Third Age global group data size and end pointer disagree"
+        )
+    if not group_data_offset <= group_end_offset <= len(data):
+        raise StreamTableError(
+            "Third Age global group data area is outside the .shdr"
+        )
+
+    relative_offsets = list(
+        unpack_from(endian + f"{group_count}I", data, offsets_offset)
+    )
+    if not relative_offsets or relative_offsets[0] != 0:
+        raise StreamTableError(
+            "first Third Age global stream-group relative offset is not zero"
+        )
+    if any(
+        next_offset <= offset
+        for offset, next_offset in zip(relative_offsets, relative_offsets[1:])
+    ):
+        raise StreamTableError(
+            "Third Age global stream-group offsets are not strictly increasing"
+        )
+    if relative_offsets[-1] >= group_data_size:
+        raise StreamTableError(
+            "last Third Age global stream-group offset is outside group data"
+        )
+
+    groups: list[StreamGroup] = []
+    entries: list[StreamAudioEntry] = []
+    meaningful_entries: list[StreamAudioEntry] = []
+    global_index = 0
+
+    for group_index, relative_offset in enumerate(relative_offsets):
+        start = group_data_offset + relative_offset
+        next_relative = (
+            relative_offsets[group_index + 1]
+            if group_index + 1 < group_count
+            else group_data_size
+        )
+        limit = group_data_offset + next_relative
+        if start + 4 > limit:
+            raise StreamTableError(
+                f"Third Age global stream group {group_index} is smaller than its header"
+            )
+
+        record_count, record_type = unpack_from(endian + "2H", data, start)
+        if record_count > MAX_REASONABLE_STREAM_ENTRIES:
+            raise StreamTableError(
+                f"Third Age global group {group_index} has implausible record count "
+                f"{record_count}"
+            )
+        required_size = 4 + record_count * STREAM_RECORD_OBSERVED_SIZE
+        if required_size != limit - start:
+            raise StreamTableError(
+                f"Third Age global group {group_index} occupies 0x{limit - start:X} "
+                f"bytes, but its {record_count} records require 0x{required_size:X}"
+            )
+
+        groups.append(
+            StreamGroup(
+                index=group_index,
+                relative_offset=relative_offset,
+                data_offset=start,
+                record_count=record_count,
+                record_type=record_type,
+            )
+        )
+
+        records_offset = start + 4
+        for group_entry_index in range(record_count):
+            offset = records_offset + group_entry_index * STREAM_RECORD_OBSERVED_SIZE
+            raw_record = data[offset : offset + STREAM_RECORD_OBSERVED_SIZE]
+            fixed_rate, unknown_04, bulk_offset, stored_size = unpack_from(
+                endian + "4I", raw_record, 0
+            )
+            field_10, block_count, flags = unpack_from(
+                endian + "3H", raw_record, 0x10
+            )
+            channels = raw_record[0x16]
+            source_selector = raw_record[0x17]
+
+            if stored_size == 0:
+                if not _is_third_age_global_placeholder(
+                    fixed_rate,
+                    unknown_04,
+                    bulk_offset,
+                    stored_size,
+                    field_10,
+                    block_count,
+                    flags,
+                    channels,
+                ):
+                    raise StreamTableError(
+                        f"Third Age global group {group_index} entry "
+                        f"{group_entry_index} is a malformed empty slot"
+                    )
+                entry = StreamAudioEntry(
+                    index=global_index,
+                    sample_rate=0,
+                    unknown_04=unknown_04,
+                    bulk_offset=bulk_offset,
+                    stored_size=0,
+                    field_10=field_10,
+                    block_count=block_count,
+                    flags=flags,
+                    channels=channels,
+                    field_17=source_selector,
+                    raw_record=raw_record,
+                    group_index=group_index,
+                    group_entry_index=group_entry_index,
+                    record_type=record_type,
+                    sample_rate_raw=fixed_rate,
+                    sample_rate_encoding="empty global stream slot",
+                )
+                entries.append(entry)
+                global_index += 1
+                continue
+
+            sample_rate = _third_age_fixed_rate_to_hz(fixed_rate)
+            if not (
+                MIN_REASONABLE_SAMPLE_RATE
+                <= sample_rate
+                <= MAX_REASONABLE_SAMPLE_RATE
+            ):
+                raise StreamTableError(
+                    f"Third Age global group {group_index} entry {group_entry_index} "
+                    f"has implausible fixed-point rate 0x{fixed_rate:X} "
+                    f"({sample_rate} Hz)"
+                )
+            if not 1 <= channels <= 8:
+                raise StreamTableError(
+                    f"Third Age global group {group_index} entry {group_entry_index} "
+                    f"has implausible channel count {channels}"
+                )
+            if block_count == 0:
+                raise StreamTableError(
+                    f"Third Age global group {group_index} entry {group_entry_index} "
+                    "has zero blocks"
+                )
+            if not 0 <= field_10 < STREAM_BLOCK_SIZE:
+                raise StreamTableError(
+                    f"Third Age global group {group_index} entry {group_entry_index} "
+                    f"has invalid final-block padding 0x{field_10:X}"
+                )
+            final_block_size = STREAM_BLOCK_SIZE - field_10
+            if final_block_size < STREAM_BLOCK_HEADER_SIZE:
+                raise StreamTableError(
+                    f"Third Age global group {group_index} entry {group_entry_index} "
+                    f"has final physical block size 0x{final_block_size:X}"
+                )
+            expected_size = channels * (
+                (block_count - 1) * STREAM_BLOCK_SIZE + final_block_size
+            )
+            if stored_size != expected_size:
+                raise StreamTableError(
+                    f"Third Age global group {group_index} entry {group_entry_index} "
+                    f"stores 0x{stored_size:X} bytes, but its block geometry "
+                    f"requires 0x{expected_size:X}"
+                )
+
+            entry = StreamAudioEntry(
+                index=global_index,
+                sample_rate=sample_rate,
+                unknown_04=unknown_04,
+                bulk_offset=bulk_offset,
+                stored_size=stored_size,
+                field_10=field_10,
+                block_count=block_count,
+                flags=flags,
+                channels=channels,
+                field_17=source_selector,
+                raw_record=raw_record,
+                group_index=group_index,
+                group_entry_index=group_entry_index,
+                record_type=record_type,
+                sample_rate_raw=fixed_rate,
+                sample_rate_encoding="16.16 multiplier x 32000 Hz",
+            )
+            entries.append(entry)
+            meaningful_entries.append(entry)
+            global_index += 1
+
+    if not meaningful_entries:
+        raise StreamTableError(
+            "Third Age global stream catalog has no stored-audio records"
+        )
+
+    chain_lists_by_source: defaultdict[int, list[list[StreamAudioEntry]]] = (
+        defaultdict(list)
+    )
+    for entry in meaningful_entries:
+        source_chains = chain_lists_by_source[entry.field_17]
+        matches = [
+            chain
+            for chain in source_chains
+            if chain[-1].bulk_offset + chain[-1].stored_size == entry.bulk_offset
+        ]
+        if len(matches) == 1:
+            matches[0].append(entry)
+        elif len(matches) > 1:
+            raise StreamTableError(
+                f"source selector {entry.field_17} has ambiguous continuation at "
+                f"offset 0x{entry.bulk_offset:X}"
+            )
+        elif entry.bulk_offset == 0:
+            source_chains.append([entry])
+        else:
+            raise StreamTableError(
+                f"source selector {entry.field_17} entry {entry.index} begins at "
+                f"0x{entry.bulk_offset:X} without continuing an earlier chain"
+            )
+
+    updated_by_index: dict[int, StreamAudioEntry] = {}
+    source_chains: list[ThirdAgeStreamSourceChain] = []
+    for source_selector in sorted(chain_lists_by_source):
+        for chain_index, chain_entries in enumerate(
+            chain_lists_by_source[source_selector]
+        ):
+            updated_entries: list[StreamAudioEntry] = []
+            for source_entry_index, entry in enumerate(chain_entries):
+                updated = replace(
+                    entry,
+                    source_chain_index=chain_index,
+                    source_chain_entry_index=source_entry_index,
+                )
+                updated_by_index[entry.index] = updated
+                updated_entries.append(updated)
+            logical_size = (
+                updated_entries[-1].bulk_offset
+                + updated_entries[-1].stored_size
+            )
+            source_chains.append(
+                ThirdAgeStreamSourceChain(
+                    source_selector=source_selector,
+                    chain_index=chain_index,
+                    entries=tuple(updated_entries),
+                    logical_size=logical_size,
+                )
+            )
+
+    entries = [updated_by_index.get(entry.index, entry) for entry in entries]
+    table = ParsedStreamTable(
+        source_path=source_path,
+        byte_order="big" if endian == ">" else "little",
+        endian=endian,
+        section_offset=offsets_offset,
+        section_size=group_end_offset - offsets_offset,
+        descriptor=None,
+        record_stride=STREAM_RECORD_OBSERVED_SIZE,
+        record_type=None,
+        entries=tuple(entries),
+        score=len(meaningful_entries) * 40 + len(source_chains) * 20,
+        layout="third-age-global-grouped",
+        groups=tuple(groups),
+        group_offset_table_offset=offsets_offset,
+        group_data_offset=group_data_offset,
+        group_data_size=group_data_size,
+        group_end_offset=group_end_offset,
+    )
+    return table, tuple(source_chains)
+
+
+def find_third_age_global_stream_table(
+    files: Mapping[Path, bytes],
+    preferred_endian: str | None,
+) -> tuple[ParsedStreamTable, tuple[ThirdAgeStreamSourceChain, ...]]:
+    """Find the global multi-source stream catalog in a standalone SCG."""
+
+    endian_order = [preferred_endian] if preferred_endian in {">", "<"} else []
+    endian_order.extend(endian for endian in (">", "<") if endian not in endian_order)
+    candidates: list[
+        tuple[ParsedStreamTable, tuple[ThirdAgeStreamSourceChain, ...]]
+    ] = []
+    errors: list[str] = []
+    for path, data in files.items():
+        if _logical_extension(path) != ".shdr":
+            continue
+        for endian in endian_order:
+            try:
+                candidates.append(
+                    _parse_third_age_global_stream_table(
+                        data=data,
+                        source_path=path,
+                        endian=endian,
+                    )
+                )
+            except StreamTableError as error:
+                errors.append(f"{path.as_posix()}: {error}")
+
+    if not candidates:
+        detail = errors[-1] if errors else "no .shdr resources were present"
+        raise StreamTableError(
+            f"no valid Third Age global stream table found ({detail})"
+        )
+    candidates.sort(key=lambda item: item[0].score, reverse=True)
+    if len(candidates) > 1 and candidates[1][0].score == candidates[0][0].score:
+        first, second = candidates[:2]
+        if (
+            first[0].source_path != second[0].source_path
+            or first[0].endian != second[0].endian
+        ):
+            raise StreamTableError(
+                "multiple Third Age global stream tables have equal confidence: "
+                f"{first[0].source_path} and {second[0].source_path}"
+            )
+    return candidates[0]
+
+
+def _validate_third_age_source_chain_data(
+    bulk_data: bytes,
+    chain: ThirdAgeStreamSourceChain,
+    coefficient_endian: str,
+) -> tuple[bool, str]:
+    """Structurally test a source chain against the supplied companion file."""
+
+    if chain.logical_size > len(bulk_data):
+        return False, (
+            f"requires 0x{chain.logical_size:X} bytes, companion has "
+            f"0x{len(bulk_data):X}"
+        )
+
+    for entry in chain.entries:
+        start = entry.bulk_offset
+        end = start + entry.stored_size
+        if end > len(bulk_data):
+            return False, f"entry {entry.index} extends beyond the companion"
+        final_block_size = STREAM_BLOCK_SIZE - entry.field_10
+        coefficient_sets: list[bytes | None] = [None] * entry.channels
+        position = start
+        for block_index in range(entry.block_count):
+            physical_size = (
+                final_block_size
+                if block_index == entry.block_count - 1
+                else STREAM_BLOCK_SIZE
+            )
+            for channel in range(entry.channels):
+                chunk_end = position + physical_size
+                if chunk_end > end:
+                    return False, (
+                        f"entry {entry.index} channel {channel} block "
+                        f"{block_index} is truncated"
+                    )
+                coefficients = bulk_data[position : position + 32]
+                if len(coefficients) != 32:
+                    return False, f"entry {entry.index} has a truncated header"
+                if coefficient_sets[channel] is None:
+                    coefficient_sets[channel] = coefficients
+                elif coefficient_sets[channel] != coefficients:
+                    return False, (
+                        f"entry {entry.index} channel {channel} changes DSP "
+                        f"coefficients at block {block_index}"
+                    )
+
+                payload_start = position + STREAM_BLOCK_HEADER_SIZE
+                payload_end = min(chunk_end, payload_start + 8 * 16)
+                for frame_offset in range(payload_start, payload_end, 8):
+                    frame = bulk_data[frame_offset : frame_offset + 8]
+                    if len(frame) < 8:
+                        return False, f"entry {entry.index} has a partial DSP frame"
+                    if frame[0] >> 4 >= 8:
+                        return False, (
+                            f"entry {entry.index} channel {channel} has invalid "
+                            f"DSP predictor {frame[0] >> 4}"
+                        )
+                position = chunk_end
+        if position != end:
+            return False, (
+                f"entry {entry.index} consumed 0x{position - start:X} of "
+                f"0x{entry.stored_size:X} bytes"
+            )
+
+    return True, "validated DSP block geometry"
+
+
+def select_third_age_global_source_chain(
+    bulk_data: bytes,
+    source_chains: Sequence[ThirdAgeStreamSourceChain],
+    coefficient_endian: str,
+) -> tuple[ThirdAgeStreamSourceChain, int, bool]:
+    """Select the source/disc chain represented by one physical SAS file."""
+
+    validated: list[
+        tuple[tuple[int, int, int], ThirdAgeStreamSourceChain, int, bool]
+    ] = []
+    rejected: list[str] = []
+    for chain in source_chains:
+        if chain.logical_size > len(bulk_data):
+            rejected.append(
+                f"source {chain.source_selector} chain {chain.chain_index}: "
+                f"0x{chain.logical_size:X} bytes required"
+            )
+            continue
+        valid, detail = _validate_third_age_source_chain_data(
+            bulk_data,
+            chain,
+            coefficient_endian=coefficient_endian,
+        )
+        if not valid:
+            rejected.append(
+                f"source {chain.source_selector} chain {chain.chain_index}: {detail}"
+            )
+            continue
+        trailing_size = len(bulk_data) - chain.logical_size
+        trailing_is_zero = not trailing_size or not any(
+            bulk_data[chain.logical_size:]
+        )
+        rank = (
+            1 if trailing_size == 0 else 0,
+            1 if trailing_is_zero else 0,
+            chain.logical_size,
+        )
+        validated.append((rank, chain, trailing_size, trailing_is_zero))
+
+    if not validated:
+        expected = ", ".join(
+            f"source {chain.source_selector}/chain {chain.chain_index}="
+            f"0x{chain.logical_size:X}"
+            for chain in source_chains
+        )
+        detail = "; ".join(rejected[-6:])
+        raise StreamTableError(
+            "the companion SAS does not match any global stream source chain; "
+            f"expected chain sizes: {expected}"
+            + (f" ({detail})" if detail else "")
+        )
+
+    validated.sort(key=lambda item: item[0], reverse=True)
+    best = validated[0]
+    if len(validated) > 1 and validated[1][0] == best[0]:
+        other = validated[1]
+        raise StreamTableError(
+            "the companion SAS matches multiple global source chains equally: "
+            f"source {best[1].source_selector}/chain {best[1].chain_index} and "
+            f"source {other[1].source_selector}/chain {other[1].chain_index}"
+        )
+    return best[1], best[2], best[3]
+
+
 def find_third_age_stream_table(
     files: Mapping[Path, bytes],
     bulk_size: int,
@@ -3290,6 +3837,218 @@ def extract_third_age_streamed_audio(
     return result, warnings, failures
 
 
+
+def extract_third_age_global_streamed_audio(
+    archive: LoadedArchive,
+    output_root: Path,
+    forced_sample_rate: int | None,
+    ffmpeg: str,
+) -> tuple[dict[str, object], list[str], list[dict[str, str]]]:
+    """Extract the source/disc chain present in ``globscen.sas``."""
+
+    bulk_path, bulk_data = _find_bulk_file(archive)
+    table, source_chains = find_third_age_global_stream_table(
+        archive.files,
+        preferred_endian=_preferred_endian(archive),
+    )
+    selected_chain, trailing_size, trailing_is_zero = (
+        select_third_age_global_source_chain(
+            bulk_data,
+            source_chains,
+            coefficient_endian=table.endian,
+        )
+    )
+
+    warnings: list[str] = []
+    failures: list[dict[str, str]] = []
+    stream_manifest: list[dict[str, object]] = []
+    streamed_root = output_root / "streamed"
+    if trailing_size:
+        warnings.append(
+            f"the selected global source chain ends at 0x{selected_chain.logical_size:X}; "
+            f"the companion has 0x{trailing_size:X} trailing bytes, which are "
+            + ("zero-filled" if trailing_is_zero else "not entirely zero-filled")
+        )
+
+    used_names: set[str] = set()
+    for entry in tqdm(
+        selected_chain.entries,
+        total=len(selected_chain.entries),
+    ):
+        sample_rate = forced_sample_rate or entry.sample_rate
+        if not MIN_REASONABLE_SAMPLE_RATE <= sample_rate <= MAX_REASONABLE_SAMPLE_RATE:
+            failures.append(
+                {
+                    "stream_index": str(entry.index),
+                    "error": f"implausible sample rate {sample_rate}",
+                }
+            )
+            continue
+
+        try:
+            (
+                pcm,
+                channel_sample_counts,
+                padded_samples,
+                final_block_size,
+            ) = decode_third_age_streamed_dsp(
+                bulk_data=bulk_data,
+                entry=entry,
+                coefficient_endian=table.endian,
+            )
+        except DspDecodeError as error:
+            failures.append(
+                {
+                    "stream_index": str(entry.index),
+                    "error": str(error),
+                }
+            )
+            continue
+
+        record_type = entry.record_type if entry.record_type is not None else 0
+        stem = (
+            f"STREAM_S{entry.field_17:02d}_"
+            f"C{selected_chain.chain_index:02d}_"
+            f"G{entry.group_index or 0:02d}_"
+            f"I{entry.group_entry_index or 0:04d}_"
+            f"T{record_type:02X}"
+        )
+        output_name = stem + ".flac"
+        if output_name.lower() in used_names:
+            output_name = f"{stem}_stream{entry.index:04d}.flac"
+        used_names.add(output_name.lower())
+        output_path = streamed_root / output_name
+
+        try:
+            write_flac(
+                output_path,
+                pcm,
+                sample_rate,
+                entry.channels,
+                ffmpeg=ffmpeg,
+            )
+        except FlacEncodeError as error:
+            failures.append(
+                {
+                    "stream_index": str(entry.index),
+                    "error": str(error),
+                }
+            )
+            continue
+
+        output_frames = len(pcm) // entry.channels
+        stream_manifest.append(
+            {
+                "stream_index": entry.index,
+                "stream_group": entry.group_index,
+                "stream_index_in_group": entry.group_entry_index,
+                "stream_record_type": entry.record_type,
+                "stream_record_type_hex": (
+                    f"0x{entry.record_type:X}"
+                    if entry.record_type is not None
+                    else None
+                ),
+                "source_selector": entry.field_17,
+                "source_chain_index": entry.source_chain_index,
+                "source_chain_entry_index": entry.source_chain_entry_index,
+                "output_path": output_path.relative_to(output_root).as_posix(),
+                "sample_rate": sample_rate,
+                "metadata_sample_rate": entry.sample_rate,
+                "metadata_sample_rate_raw": entry.sample_rate_raw,
+                "metadata_sample_rate_raw_hex": (
+                    f"0x{entry.sample_rate_raw:X}"
+                    if entry.sample_rate_raw is not None
+                    else None
+                ),
+                "metadata_sample_rate_encoding": entry.sample_rate_encoding,
+                "channels": entry.channels,
+                "sample_format": "signed 16-bit PCM",
+                "output_frames": output_frames,
+                "duration_seconds": round(output_frames / sample_rate, 9),
+                "channel_sample_counts_before_padding": channel_sample_counts,
+                "padded_samples": padded_samples,
+                "sas_offset": entry.bulk_offset,
+                "sas_offset_hex": f"0x{entry.bulk_offset:X}",
+                "stored_size": entry.stored_size,
+                "stored_size_hex": f"0x{entry.stored_size:X}",
+                "physical_block_size": STREAM_BLOCK_SIZE,
+                "physical_block_header_size": STREAM_BLOCK_HEADER_SIZE,
+                "blocks_per_channel": entry.block_count,
+                "final_block_padding": entry.field_10,
+                "final_block_padding_hex": f"0x{entry.field_10:X}",
+                "final_physical_block_size": final_block_size,
+                "final_physical_block_size_hex": f"0x{final_block_size:X}",
+                "metadata_flags": entry.flags,
+                "metadata_flags_hex": f"0x{entry.flags:X}",
+                "metadata_unknown_04": entry.unknown_04,
+            }
+        )
+
+    result: dict[str, object] = {
+        "bulk_path": bulk_path.as_posix(),
+        "source_sas_path": (
+            str(archive.bulk_source_path)
+            if archive.bulk_source_path is not None
+            else None
+        ),
+        "bulk_size": len(bulk_data),
+        "stream_table_shdr_path": table.source_path.as_posix(),
+        "stream_table_layout": table.layout,
+        "stream_table_byte_order": table.byte_order,
+        "stream_table_section_offset": table.section_offset,
+        "stream_table_section_offset_hex": f"0x{table.section_offset:X}",
+        "stream_table_section_size": table.section_size,
+        "stream_table_record_stride": table.record_stride,
+        "stream_record_count": len(table.entries),
+        "stored_stream_record_count": sum(
+            len(chain.entries) for chain in source_chains
+        ),
+        "empty_stream_slot_count": sum(
+            1 for entry in table.entries if entry.stored_size == 0
+        ),
+        "stream_group_offset_table_offset": table.group_offset_table_offset,
+        "stream_group_data_offset": table.group_data_offset,
+        "stream_group_data_size": table.group_data_size,
+        "stream_group_end_offset": table.group_end_offset,
+        "stream_groups": [
+            {
+                "group_index": group.index,
+                "relative_offset": group.relative_offset,
+                "relative_offset_hex": f"0x{group.relative_offset:X}",
+                "data_offset": group.data_offset,
+                "data_offset_hex": f"0x{group.data_offset:X}",
+                "record_count": group.record_count,
+                "record_type": group.record_type,
+                "record_type_hex": f"0x{group.record_type:X}",
+            }
+            for group in table.groups
+        ],
+        "source_chains": [
+            {
+                "source_selector": chain.source_selector,
+                "source_chain_index": chain.chain_index,
+                "stream_count": len(chain.entries),
+                "logical_size": chain.logical_size,
+                "logical_size_hex": f"0x{chain.logical_size:X}",
+                "selected_for_companion": chain == selected_chain,
+            }
+            for chain in source_chains
+        ],
+        "selected_source_selector": selected_chain.source_selector,
+        "selected_source_chain_index": selected_chain.chain_index,
+        "selected_source_stream_count": len(selected_chain.entries),
+        "selected_source_logical_size": selected_chain.logical_size,
+        "selected_source_logical_size_hex": f"0x{selected_chain.logical_size:X}",
+        "trailing_unindexed_size": trailing_size,
+        "trailing_unindexed_size_hex": f"0x{trailing_size:X}",
+        "trailing_unindexed_bytes_are_zero": trailing_is_zero,
+        "extracted_stream_count": len(stream_manifest),
+        "ignored_streams": [],
+        "streams": stream_manifest,
+    }
+    return result, warnings, failures
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -3319,6 +4078,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help=(
             "force a uniform rate for both sample-bank and streamed audio; "
             "normally the rate is read from .shdr metadata"
+        ),
+    )
+    parser.add_argument(
+        "--skip_resources",
+        "--skip-resources",
+        dest="skip_resources",
+        action="store_true",
+        help=(
+            "skip .shdr/.samp sample-bank FLACs under resources; "
+            "long streamed audio is still extracted"
         ),
     )
     parser.add_argument(
@@ -3357,44 +4126,87 @@ def main(argv: Sequence[str] | None = None) -> int:
     failures: list[dict[str, str]] = []
     sample_bank_manifests: list[dict[str, object]] = []
 
-    pairs, pair_warnings = pair_sample_resources(archive.files)
-    warnings.extend(pair_warnings)
-    preferred_endian = _preferred_endian(archive)
+    if args.skip_resources:
+        print("Skipping sample-bank resource FLAC extraction (--skip_resources).")
+    else:
+        pairs, pair_warnings = pair_sample_resources(archive.files)
+        warnings.extend(pair_warnings)
+        preferred_endian = _preferred_endian(archive)
 
-    for pair in pairs:
-        print(
-            f"Extracting sample bank {pair.samp_path.as_posix()} using "
-            f"{pair.shdr_path.as_posix()} ..."
-        )
-        try:
-            bank_manifest, bank_warnings = extract_sample_pair(
-                pair=pair,
-                output_root=output_root,
-                forced_sample_rate=args.sample_rate,
-                preferred_endian=preferred_endian,
-                ffmpeg=ffmpeg,
-            )
-        except AudioExtractionError as error:
-            failures.append(
-                {
-                    "kind": "sample_bank",
-                    "source": pair.samp_path.as_posix(),
-                    "error": str(error),
-                }
-            )
+        for pair in pairs:
             print(
-                f"warning: skipped sample bank {pair.samp_path.as_posix()}: "
-                f"{error}",
-                file=sys.stderr,
+                f"Extracting sample bank {pair.samp_path.as_posix()} using "
+                f"{pair.shdr_path.as_posix()} ..."
             )
-            continue
+            try:
+                bank_manifest, bank_warnings = extract_sample_pair(
+                    pair=pair,
+                    output_root=output_root,
+                    forced_sample_rate=args.sample_rate,
+                    preferred_endian=preferred_endian,
+                    ffmpeg=ffmpeg,
+                )
+            except AudioExtractionError as error:
+                failures.append(
+                    {
+                        "kind": "sample_bank",
+                        "source": pair.samp_path.as_posix(),
+                        "error": str(error),
+                    }
+                )
+                print(
+                    f"warning: skipped sample bank {pair.samp_path.as_posix()}: "
+                    f"{error}",
+                    file=sys.stderr,
+                )
+                continue
 
-        sample_bank_manifests.append(bank_manifest)
-        warnings.extend(bank_warnings)
-        print(f"  wrote {bank_manifest['output_file_count']} mono FLAC files")
+            sample_bank_manifests.append(bank_manifest)
+            warnings.extend(bank_warnings)
+            print(f"  wrote {bank_manifest['output_file_count']} mono FLAC files")
 
     streamed_manifest: dict[str, object] | None = None
-    if archive.archive_variant in THIRD_AGE_ARCHIVE_VARIANTS:
+    if archive.archive_variant in THIRD_AGE_GLOBAL_ARCHIVE_VARIANTS:
+        source_text = (
+            f" from companion SAS {archive.bulk_source_path}"
+            if archive.bulk_source_path is not None
+            else " from the NiemaFS bulk resource"
+        )
+        print(f"Extracting global Third Age streamed audio{source_text} ...")
+        try:
+            streamed_manifest, stream_warnings, stream_failures = (
+                extract_third_age_global_streamed_audio(
+                    archive=archive,
+                    output_root=output_root,
+                    forced_sample_rate=args.sample_rate,
+                    ffmpeg=ffmpeg,
+                )
+            )
+            warnings.extend(stream_warnings)
+            failures.extend(
+                {
+                    "kind": "streamed_audio",
+                    "source": f"stream {failure['stream_index']}",
+                    "error": failure["error"],
+                }
+                for failure in stream_failures
+            )
+            print(
+                f"  selected source {streamed_manifest['selected_source_selector']} "
+                f"chain {streamed_manifest['selected_source_chain_index']} "
+                f"({streamed_manifest['selected_source_stream_count']} records)"
+            )
+            print(
+                f"  wrote {streamed_manifest['extracted_stream_count']} "
+                "streamed FLAC files"
+            )
+        except AudioExtractionError as error:
+            warnings.append(f"streamed audio was not extracted: {error}")
+            print(
+                f"warning: streamed audio was not extracted: {error}",
+                file=sys.stderr,
+            )
+    elif archive.archive_variant in THIRD_AGE_CHAPTER_ARCHIVE_VARIANTS:
         source_text = (
             f" from companion SAS {archive.bulk_source_path}"
             if archive.bulk_source_path is not None
@@ -3499,6 +4311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "archive_format": archive.archive_format,
         "archive_variant": archive.archive_variant,
         "archive_byte_order": archive.byte_order,
+        "skip_resources": args.skip_resources,
         "ffmpeg_executable": ffmpeg,
         "output_representation": "FLAC (lossless) from signed 16-bit PCM",
         "flac_compression_level": FLAC_COMPRESSION_LEVEL,
