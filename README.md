@@ -98,7 +98,7 @@ If a `.flac` file matched the *start* of the `.vid` file but had audio *after th
 ffmpeg -i audio.flac -map 0:a:0 -t "$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" -c:a flac -compression_level 12 audio.trimmed.flac
 ```
 
-If a a `.flac` file matched the *end* of the `.vid` fil but had audio *before the start* of the `.vid` file (e.g. a cutscene that transitions from in-engine to `.vid` FMV), I used the following command to extract the **end** of the `.flac` file:
+If a `.flac` file matched the *end* of the `.vid` fil but had audio *before the start* of the `.vid` file (e.g. a cutscene that transitions from in-engine to `.vid` FMV), I used the following command to extract the **end** of the `.flac` file:
 
 ```bash
 d="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 video.mkv)" && ffmpeg -sseof "-$d" -i audio.flac -map 0:a:0 -t "$d" -c:a flac -compression_level 12 audio.trimmed.flac
